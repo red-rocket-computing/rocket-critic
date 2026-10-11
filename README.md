@@ -1,2 +1,2 @@
 # rocket-critic
-Code Review intelligence tool for inline comments
+Code review intelligence tool for inline comments
