@@ -6,7 +6,12 @@ import time
 
 from .config import RepoConfig
 from .github import PullRequest
-from .state import DONE, FAILED, RUNNING, SKIPPED, State
+from .state import ATTENTION, DONE, FAILED, PENDING, RUNNING, SKIPPED, State
+
+NEW_HEAD = "new head"
+SETTLING = "settling"
+RETRY = "retry"
+TOO_LARGE = "too large"
 
 
 def matches(pr: PullRequest, repo: RepoConfig) -> tuple[bool, str]:
@@ -26,30 +31,46 @@ def matches(pr: PullRequest, repo: RepoConfig) -> tuple[bool, str]:
             return False, "no matching label or review request"
     size = pr.size
     if repo.review.max_diff_lines and size is not None and size > repo.review.max_diff_lines:
-        return False, f"too large ({size} changed lines > {repo.review.max_diff_lines})"
+        return False, f"{TOO_LARGE} ({size} changed lines > {repo.review.max_diff_lines})"
     return True, "ok"
 
 
 def due(pr: PullRequest, repo: RepoConfig, state: State, retry_base: float, now: float | None = None) -> tuple[bool, str]:
-    """History-based checks: already reviewed, in progress, or failed and backing off."""
+    """History-based checks: already reviewed, settling, capped, in progress, or failed and backing off.
+
+    Returns ``(False, SETTLING)`` for a head seen for the first time while a
+    settle delay is configured; the caller records it as pending.
+    """
     now = time.time() if now is None else now
+    review = repo.review
     rec = state.get(pr.repo, pr.number, pr.head_sha)
-    if rec is None:
-        if not repo.review.rereview_on_push and state.any_done(pr.repo, pr.number):
+    if rec is None or rec.status == PENDING:
+        if not review.rereview_on_push and state.any_done(pr.repo, pr.number):
             return False, "already reviewed an earlier commit"
-        return True, "new head"
-    if rec.status in (DONE, SKIPPED):
+        if rec is None and review.settle_seconds:
+            return False, SETTLING
+        if rec is not None and now < rec.updated_at + review.settle_seconds:
+            return False, f"settling ({int(rec.updated_at + review.settle_seconds - now)}s left)"
+        return _capped(pr, repo, state) or (True, NEW_HEAD)
+    if rec.status in (DONE, SKIPPED, ATTENTION):
         return False, f"already {rec.status} at {pr.head_sha[:7]}"
     if rec.status == RUNNING:
         return False, "review in progress"
     if rec.status == FAILED:
-        if rec.attempts >= repo.review.max_attempts:
+        if rec.attempts >= review.max_attempts:
             return False, f"gave up after {rec.attempts} attempts"
         wait = retry_base * (2 ** (rec.attempts - 1))
         if now < rec.updated_at + wait:
             return False, f"retry backoff ({int(rec.updated_at + wait - now)}s left)"
-        return True, f"retry {rec.attempts + 1}/{repo.review.max_attempts}"
+        return _capped(pr, repo, state) or (True, f"{RETRY} {rec.attempts + 1}/{review.max_attempts}")
     return True, rec.status
+
+
+def _capped(pr: PullRequest, repo: RepoConfig, state: State) -> tuple[bool, str] | None:
+    limit = repo.review.max_reviews_per_pr
+    if limit and state.count_done(pr.repo, pr.number) >= limit:
+        return False, f"review limit reached ({limit} per PR)"
+    return None
 
 
 def should_review(pr: PullRequest, repo: RepoConfig, state: State, retry_base: float) -> tuple[bool, str]:

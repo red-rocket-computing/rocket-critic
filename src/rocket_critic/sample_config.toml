@@ -44,6 +44,9 @@ max_diff_lines = 5000                # skip PRs with more added+deleted lines (0
 rereview_on_push = true              # review again when new commits are pushed
 max_attempts = 3                     # retries per commit after failures
 keep_worktrees = false               # keep PR checkouts after review (debugging)
+max_reviews_per_pr = 5               # stop re-reviewing a PR after this many reviews (0 = no limit)
+settle_seconds = 0                   # wait this long after a push before reviewing (coalesces bursts)
+incremental = true                   # re-reviews only cover new commits and see earlier review threads
 
 [[repos]]
 name = "owner/repo"

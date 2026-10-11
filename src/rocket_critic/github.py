@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -62,6 +63,17 @@ class PullRequest:
         )
 
 
+@dataclass
+class Thread:
+    """An inline review comment and its replies."""
+
+    path: str
+    line: int | None  # None when the comment is outdated (its code changed since)
+    author: str
+    body: str
+    replies: list[tuple[str, str]] = field(default_factory=list)  # (author, body)
+
+
 class GitHub:
     def __init__(self, gh: str = "gh", env: Mapping[str, str] | None = None):
         self.gh = gh
@@ -96,6 +108,45 @@ class GitHub:
                     shas.add(review["commit_id"])
         return shas
 
+    def posted_since(self, repo: str, number: int, login: str, since: float) -> bool:
+        """Whether ``login`` posted a review, review comment or PR comment at or after ``since``."""
+        login = login.lower()
+        stamp = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        sources = (
+            (f"repos/{repo}/pulls/{number}/reviews", "submitted_at"),
+            (f"repos/{repo}/pulls/{number}/comments?since={stamp}", "created_at"),
+            (f"repos/{repo}/issues/{number}/comments?since={stamp}", "created_at"),
+        )
+        for path, time_key in sources:
+            for page in self._json("api", "--paginate", "--slurp", path) or []:
+                for item in page:
+                    if (item.get("user") or {}).get("login", "").lower() != login:
+                        continue
+                    if _ts(item.get(time_key)) >= int(since):
+                        return True
+        return False
+
+    def review_threads(self, repo: str, number: int) -> list[Thread]:
+        """Inline review threads on the PR, oldest first."""
+        threads: dict[int, Thread] = {}
+        replies: list[dict[str, Any]] = []
+        for page in self._json("api", "--paginate", "--slurp", f"repos/{repo}/pulls/{number}/comments") or []:
+            for c in page:
+                if c.get("in_reply_to_id"):
+                    replies.append(c)
+                else:
+                    threads[c["id"]] = Thread(
+                        path=c.get("path") or "",
+                        line=c.get("line"),
+                        author=(c.get("user") or {}).get("login") or "",
+                        body=c.get("body") or "",
+                    )
+        for c in replies:
+            thread = threads.get(c["in_reply_to_id"])
+            if thread is not None:
+                thread.replies.append(((c.get("user") or {}).get("login") or "", c.get("body") or ""))
+        return list(threads.values())
+
     def whoami(self, env: Mapping[str, str] | None = None) -> str | None:
         """Login of the authenticated identity, or None (e.g. an app token without /user access)."""
         try:
@@ -107,3 +158,9 @@ class GitHub:
         res = proc.run([self.gh, "auth", "status"], env=self.env, timeout=60, check=False)
         return res.returncode == 0, (res.stdout + res.stderr).strip()
 
+
+def _ts(value: str | None) -> int:
+    """Seconds since the epoch for a GitHub ISO-8601 timestamp (0 if missing)."""
+    if not value:
+        return 0
+    return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())

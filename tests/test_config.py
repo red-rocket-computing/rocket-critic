@@ -64,6 +64,8 @@ def test_env_expansion_drops_unset_refs():
     ({"bogus": 1}, "unknown top-level"),
     ({"claude": {"env": {"X": 1}}}, "must be a string"),
     ({"poll_interval": 1}, "poll_interval"),
+    ({"review": {"max_reviews_per_pr": -1}}, "max_reviews_per_pr"),
+    ({"review": {"incremental": "yes"}}, "incremental"),
 ])
 def test_validation(data, msg):
     with pytest.raises(ConfigError, match=msg):

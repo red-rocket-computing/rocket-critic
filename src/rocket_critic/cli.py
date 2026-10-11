@@ -171,9 +171,12 @@ def watch(ctx: Ctx, once: bool, only: tuple[str, ...]) -> None:
 @click.option("--model", help="Override the model.")
 @click.option("--comment/--no-comment", default=None,
               help="Post inline comments (default from config); --no-comment just prints findings.")
-@click.option("--force", is_flag=True, help="Ignore filters and review history.")
+@click.option("--force", is_flag=True,
+              help="Ignore filters, review history and the per-PR review limit.")
+@click.option("--full", is_flag=True, help="Review the whole PR, without earlier-review context.")
 @pass_ctx
-def review(ctx: Ctx, pr_ref: str, level: str | None, model: str | None, comment: bool | None, force: bool) -> None:
+def review(ctx: Ctx, pr_ref: str, level: str | None, model: str | None, comment: bool | None, force: bool,
+           full: bool) -> None:
     """Review a single pull request now."""
     s = ctx.settings
     name, number = parse_pr_ref(pr_ref)
@@ -188,10 +191,13 @@ def review(ctx: Ctx, pr_ref: str, level: str | None, model: str | None, comment:
     except proc.CommandError as exc:
         raise click.ClickException(str(exc)) from None
     if not force:
+        repo.review.settle_seconds = 0  # an explicit request needs no settle delay
         ok, why = filters.should_review(pr, repo, critic.state, retry_base=0)
+        if ok and why.startswith(filters.RETRY) and not critic.retry_is_safe(pr, repo):
+            ok, why = False, "the failed attempt may have posted comments"
         if not ok:
             raise click.ClickException(f"{pr.ref}: not reviewing ({why}); use --force to override")
-    outcome = critic.review(pr, repo, comment=comment)
+    outcome = critic.review(pr, repo, comment=comment, incremental=False if full else None)
     if outcome.output_path:
         click.echo(outcome.output_path.read_text())
         click.echo(f"saved to {outcome.output_path}", err=True)

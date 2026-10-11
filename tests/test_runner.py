@@ -71,3 +71,27 @@ def test_pull_request_from_rest():
     assert pr.review_requests == ["robot", "core", "Core"]
     assert pr.size is None
     assert PullRequest.from_rest("o/r", {"number": 1, "head": {"sha": "a"}, "additions": 2, "deletions": 3}).size == 5
+
+
+def test_review_prompt_with_context():
+    s = cfg()
+    assert review_prompt(4, s.review, context="CTX") == "/code-review 4 medium --comment\n\nCTX"
+
+
+def test_rereview_context_modes_and_cap():
+    from rocket_critic.github import Thread
+    from rocket_critic.runner import MAX_THREADS_CHARS, rereview_context
+
+    threads = [Thread("a.py", 3, "bot", "Bug here.\nDetails.", [("alice", "Won't fix.")]),
+               Thread("b.py", None, "bot", "Old.")]
+    text = rereview_context("abc", "range", threads)
+    assert "`git diff abc HEAD`" in text
+    assert "- a.py:3 (bot): Bug here. Details." in text
+    assert "  - reply (alice): Won't fix." in text
+    assert "- b.py (outdated) (bot): Old." in text
+    assert "history was rewritten" in rereview_context("abc", "rewritten", [])
+    assert "Earlier review threads" not in rereview_context("abc", "repeat", [])
+
+    many = [Thread("x.py", i, "bot", "y" * 500) for i in range(200)]
+    text = rereview_context("abc", "range", many)
+    assert len(text) < MAX_THREADS_CHARS + 2000 and "more thread(s) omitted" in text

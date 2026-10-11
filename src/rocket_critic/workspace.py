@@ -55,6 +55,21 @@ class Workspace:
         self._git("worktree", "add", "--force", "--detach", str(path), head_sha, cwd=bare)
         return path
 
+    def mark_reviewed(self, repo: str, number: int, head_sha: str) -> None:
+        """Keep the last reviewed commit reachable so later reviews can diff against it."""
+        self._git("update-ref", f"refs/rocket-critic/reviewed/{number}", head_sha, cwd=self.bare_path(repo))
+
+    def is_ancestor(self, repo: str, old: str, new: str) -> bool:
+        """Whether ``old`` is an ancestor of ``new`` (False if ``old`` no longer exists upstream)."""
+        bare = self.bare_path(repo)
+        present = proc.run([self.git, "cat-file", "-e", f"{old}^{{commit}}"], cwd=bare, timeout=60, check=False)
+        if present.returncode != 0:
+            # Not fetched by this clone (e.g. the state DB outlived it); GitHub
+            # serves reachable commits by SHA.
+            proc.run([self.git, "fetch", "--quiet", "origin", old], cwd=bare, timeout=300, check=False)
+        res = proc.run([self.git, "merge-base", "--is-ancestor", old, new], cwd=bare, timeout=120, check=False)
+        return res.returncode == 0
+
     def remove(self, repo: str, path: Path) -> None:
         bare = self.bare_path(repo)
         try:

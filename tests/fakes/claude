@@ -18,6 +18,17 @@ record = {
 with open(os.environ["FAKE_CLAUDE_LOG"], "a") as fh:
     fh.write(json.dumps(record) + "\n")
 
+if os.environ.get("FAKE_CLAUDE_POST"):
+    # Simulate /code-review --comment posting a review before the run ends.
+    import time
+    path = os.environ["FAKE_GH_DATA"]
+    data = json.load(open(path))
+    login = data.get("logins", {}).get(os.environ.get("GH_TOKEN", ""), data.get("login"))
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    data.setdefault("reviews", []).append({"user": {"login": login}, "commit_id": record["head"],
+                                           "submitted_at": stamp})
+    json.dump(data, open(path, "w"))
+
 result = os.environ.get("FAKE_CLAUDE_RESULT")
 if result:
     print(open(result).read())

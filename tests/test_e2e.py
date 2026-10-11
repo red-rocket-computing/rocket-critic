@@ -2,13 +2,14 @@
 
 import json
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from rocket_critic.cli import cli, parse_pr_ref
-from rocket_critic.state import DONE, FAILED, State
+from rocket_critic.state import ATTENTION, DONE, FAILED, PENDING, PHASE_REVIEW, SKIPPED, State
 
 FAKES = Path(__file__).parent / "fakes"
 
@@ -51,8 +52,12 @@ class Env:
 
         self.prs = [self.pr(1, self.pr_sha), self.pr(2, self.pr_sha, draft=True)]
         self.reviews = []
+        self.comments = []
         self.write_gh()
         self.config = tmp / "config.toml"
+        self.write_config()
+
+    def write_config(self, review=""):
         self.config.write_text(f"""
 workdir = "{self.workdir}"
 poll_interval = 60
@@ -61,6 +66,8 @@ model = "glm-5.3:cloud"
 [claude.env]
 ANTHROPIC_BASE_URL = "http://localhost:11434"
 GH_TOKEN = "${{RC_TOK}}"
+[review]
+{review}
 [[repos]]
 name = "o/r"
 """)
@@ -84,8 +91,36 @@ name = "o/r"
 
     def write_gh(self):
         self.gh_data.write_text(json.dumps({
-            "prs": self.prs, "reviews": self.reviews, "login": "me", "logins": {"bot-token": "rc-bot"},
+            "prs": self.prs, "reviews": self.reviews, "comments": self.comments,
+            "login": "me", "logins": {"bot-token": "rc-bot"},
         }))
+
+    def new_head(self, content):
+        sha = self.push_pr(1, "feature", content=content)
+        self.prs[0]["head"]["sha"] = sha
+        self.write_gh()
+        return sha
+
+    def extend_head(self, content):
+        """Add a commit on top of the PR's current head (a normal follow-up push)."""
+        git("checkout", "-q", "feature", cwd=self.src)
+        (self.src / "app.py").write_text(content)
+        git("commit", "-qam", "follow-up", cwd=self.src)
+        sha = git("rev-parse", "HEAD", cwd=self.src)
+        git("push", "-q", "-f", str(self.remote), f"{sha}:refs/pull/1/head", cwd=self.src)
+        self.prs[0]["head"]["sha"] = sha
+        self.write_gh()
+        return sha
+
+    def age(self, sha, seconds):
+        """Pretend the state row for ``sha`` was last touched ``seconds`` ago."""
+        st = self.state()
+        with st.db:
+            st.db.execute("UPDATE reviews SET updated_at = updated_at - ? WHERE head_sha = ?", (seconds, sha))
+
+    def gh_calls(self):
+        log = Path(str(self.gh_data) + ".log")
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
     def run(self, *args):
         return CliRunner().invoke(cli, ["-c", str(self.config), *args], catch_exceptions=False)
@@ -132,7 +167,11 @@ def test_review_one_pr(env):
     assert res.exit_code != 0 and "already done" in res.output
     res = env.run("review", "o/r#1", "--force", "--no-comment", "--level", "high")
     assert res.exit_code == 0, res.output
-    assert env.calls()[-1]["argv"][1] == "/code-review 1 high"
+    prompt = env.calls()[-1]["argv"][1]
+    assert prompt.splitlines()[0] == "/code-review 1 high"
+    assert "already reviewed; it is being reviewed again in full" in prompt
+    res = env.run("review", "o/r#1", "--force", "--full")
+    assert env.calls()[-1]["argv"][1] == "/code-review 1 medium --comment"
 
 
 def test_watch_reviews_new_heads_once(env):
@@ -142,9 +181,7 @@ def test_watch_reviews_new_heads_once(env):
     assert env.run("watch", "--once").exit_code == 0
     assert len(env.calls()) == 1
 
-    new_sha = env.push_pr(1, "feature", content="print('again')\n")
-    env.prs[0]["head"]["sha"] = new_sha
-    env.write_gh()
+    new_sha = env.new_head("print('again')\n")
     assert env.run("watch", "--once").exit_code == 0
     assert len(env.calls()) == 2 and env.calls()[-1]["head"] == new_sha
 
@@ -173,12 +210,125 @@ def test_failed_review_is_recorded(env, monkeypatch):
     assert rec.status == FAILED and rec.attempts == 1
 
 
-def test_watch_skips_large_pr_after_fetching_size(env):
+def test_large_pr_is_skipped_once_per_commit(env):
     env.prs[0]["additions"] = 9000
     env.write_gh()
     assert env.run("watch", "--once").exit_code == 0
     assert env.calls() == []
+    rec = env.state().get("o/r", 1, env.pr_sha)
+    assert rec.status == SKIPPED and "too large" in rec.error
+
+    before = len(env.gh_calls())
+    assert env.run("watch", "--once").exit_code == 0
+    assert [c for c in env.gh_calls()[before:] if "pulls?" not in " ".join(c)] == []  # only the PR list
+
+
+def test_rereview_gets_range_and_earlier_threads(env):
+    first = env.pr_sha
+    assert env.run("watch", "--once").exit_code == 0
+    assert "Re-review" not in env.calls()[0]["argv"][1]
+
+    env.comments = [
+        {"id": 10, "path": "app.py", "line": 1, "user": {"login": "rc-bot"}, "body": "Prints the wrong thing."},
+        {"id": 11, "in_reply_to_id": 10, "path": "app.py", "user": {"login": "alice"}, "body": "Intentional."},
+        {"id": 12, "path": "app.py", "line": 1, "user": {"login": "carol"}, "body": "Human nit."},
+    ]
+    env.write_gh()
+    env.extend_head("print('changed')\nprint('more')\n")
+    assert env.run("watch", "--once").exit_code == 0
+    prompt = env.calls()[-1]["argv"][1]
+    assert prompt.splitlines()[0] == "/code-review 1 medium --comment"
+    assert f"`git diff {first} HEAD`" in prompt
+    assert "- app.py:1 (rc-bot): Prints the wrong thing." in prompt
+    assert "  - reply (alice): Intentional." in prompt
+    assert "Human nit" not in prompt  # only threads started by the posting identity
+
+
+def test_rereview_after_force_push_reviews_everything(env):
+    assert env.run("watch", "--once").exit_code == 0
+    first = env.pr_sha
+    env.new_head("print('rewritten')\n")  # push_pr rebuilds the branch from main: not a descendant
+    assert env.run("watch", "--once").exit_code == 0
+    prompt = env.calls()[-1]["argv"][1]
+    assert "history was rewritten" in prompt and f"git diff {first}" not in prompt
+
+
+def test_review_limit_per_pr(env):
+    env.write_config("max_reviews_per_pr = 2")
+    assert env.run("watch", "--once").exit_code == 0
+    env.new_head("print(2)\n")
+    assert env.run("watch", "--once").exit_code == 0
+    third = env.new_head("print(3)\n")
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 2
+    res = env.run("review", "o/r#1")
+    assert res.exit_code != 0 and "review limit reached" in res.output
+    assert env.run("review", "o/r#1", "--force").exit_code == 0
+    assert env.calls()[-1]["head"] == third
+
+
+def test_settle_delay(env):
+    env.write_config("settle_seconds = 120")
+    assert env.run("watch", "--once").exit_code == 0
+    assert env.calls() == []
+    assert env.state().get("o/r", 1, env.pr_sha).status == PENDING
+    assert env.run("watch", "--once").exit_code == 0
+    assert env.calls() == []  # still settling
+    newer = env.extend_head("print('newer')\n")  # a push while settling restarts the wait
+    assert env.run("watch", "--once").exit_code == 0
     assert env.state().get("o/r", 1, env.pr_sha) is None
+    env.age(newer, 121)
+    assert env.run("watch", "--once").exit_code == 0
+    assert [c["head"] for c in env.calls()] == [newer]
+
+
+def failing_claude(env, monkeypatch, post):
+    result = env.tmp / "err.json"
+    result.write_text(json.dumps({"type": "result", "subtype": "success", "is_error": True,
+                                  "result": "API Error: stream closed"}))
+    monkeypatch.setenv("FAKE_CLAUDE_RESULT", str(result))
+    monkeypatch.setenv("FAKE_CLAUDE_EXIT", "1")
+    if post:
+        monkeypatch.setenv("FAKE_CLAUDE_POST", "1")
+
+
+def test_failure_after_posting_is_not_retried(env, monkeypatch):
+    failing_claude(env, monkeypatch, post=True)
+    assert env.run("watch", "--once").exit_code == 0
+    assert env.state().get("o/r", 1, env.pr_sha).status == FAILED
+    env.age(env.pr_sha, 3600)
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 1
+    rec = env.state().get("o/r", 1, env.pr_sha)
+    assert rec.status == ATTENTION and "posting" in rec.error
+    res = env.run("review", "o/r#1")
+    assert res.exit_code != 0 and "already attention" in res.output
+
+
+def test_failure_without_posting_is_retried(env, monkeypatch):
+    failing_claude(env, monkeypatch, post=False)
+    assert env.run("watch", "--once").exit_code == 0
+    env.age(env.pr_sha, 3600)
+    monkeypatch.delenv("FAKE_CLAUDE_RESULT")
+    monkeypatch.delenv("FAKE_CLAUDE_EXIT")
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 2
+    rec = env.state().get("o/r", 1, env.pr_sha)
+    assert rec.status == DONE and rec.attempts == 2
+
+
+def test_interrupted_run_that_posted_needs_attention(env, monkeypatch):
+    st = env.state()
+    st.start("o/r", 1, env.pr_sha)
+    st.set_phase("o/r", 1, env.pr_sha, PHASE_REVIEW)
+    started = st.get("o/r", 1, env.pr_sha).started_at
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started + 5))
+    env.reviews = [{"user": {"login": "rc-bot"}, "commit_id": env.pr_sha, "submitted_at": stamp}]
+    env.write_gh()
+    env.age(env.pr_sha, 3600)  # past the retry backoff once reset to failed
+    assert env.run("watch", "--once").exit_code == 0
+    assert env.calls() == []
+    assert env.state().get("o/r", 1, env.pr_sha).status == ATTENTION
 
 
 def test_clean_and_init(env, tmp_path):

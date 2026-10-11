@@ -46,7 +46,7 @@ rocket-critic watch                # poll forever
 | `init [--force]` | Write a sample config. |
 | `doctor` | Check `gh` auth, repo access, the `claude` binary, a test prompt against each configured model, and the GitHub login `/code-review` will post as. |
 | `watch [--once] [--repo o/r ...]` | Poll the configured repos every `poll_interval` seconds and review PRs that need it. One instance per workdir; Ctrl-C stops after the current review, and a second Ctrl-C aborts it. |
-| `review o/r#N [--level L] [--model M] [--comment/--no-comment] [--force]` | Review one PR now. Also accepts a PR URL. `--force` ignores filters and history. `--no-comment` prints the findings without posting them. |
+| `review o/r#N [--level L] [--model M] [--comment/--no-comment] [--force] [--full]` | Review one PR now. Also accepts a PR URL. `--force` ignores filters, history and the per-PR review limit. `--full` reviews the whole PR without earlier-review context. `--no-comment` prints the findings without posting them. |
 | `status [--repo o/r] [-n N]` | Recent reviews from the state database. |
 | `clean` | Remove leftover PR worktrees. |
 
@@ -91,17 +91,47 @@ table. Keys in `[repos.claude.env]` are merged one by one over `[claude.env]`.
 - If you set `base_branches`, it targets one of them.
 - If you set `labels` or `reviewers`, it has one of those labels or requests review from one of those
   users or teams.
-- Its added plus deleted lines are at most `max_diff_lines`.
+- Its added plus deleted lines are at most `max_diff_lines`. A PR over the limit is recorded as `skipped`
+  for that commit, so later polls don't fetch it again until the next push.
 - Its head commit has not been reviewed yet. A push triggers a new review unless `rereview_on_push = false`.
+- The PR has had fewer than `max_reviews_per_pr` reviews (default 5, 0 = no limit). This stops a loop
+  with an automated fixer that pushes in response to review comments.
+- If `settle_seconds` is set, the head has been unchanged for that long. A burst of pushes then gets one
+  review of the last commit.
 
-A failed review is retried with exponential backoff, up to `max_attempts` times per commit. History is kept
-in `<workdir>/state.db`. If the database is lost, rocket-critic skips any commit that already has a review
-from the posting identity on GitHub.
+`status` shows each commit's outcome: `pending` (settling), `running`, `done`, `failed` (will be retried),
+`skipped` (too large) or `attention` (see below). `review --force` overrides all of them.
+
+### Retries without duplicate comments
+
+A failed review is retried with exponential backoff, up to `max_attempts` times per commit. Before retrying a
+run that got as far as starting `/code-review --comment`, rocket-critic checks GitHub for reviews or comments
+the posting identity made since that run started. If it finds any, or it can't tell who the posting identity
+is, the commit is marked `attention` instead of retried, so a partial review is never posted twice. The same
+check covers a review interrupted by a crash or restart. Use `review --force` to redo it.
+
+History is kept in `<workdir>/state.db`. If the database is lost, rocket-critic skips any commit that
+already has a review from the posting identity on GitHub.
+
+### Re-reviews
+
+With `incremental = true` (the default), a re-review after new commits tells `/code-review`:
+
+- which commit was reviewed last, and to report findings only on lines changed since then
+  (`git diff <last> HEAD`). After a force-push or rebase, the old commit isn't an ancestor of the new head,
+  so the whole PR is reviewed again.
+- the earlier inline review threads started by the posting identity, with replies. The model is told not to
+  repeat or contradict them, and to treat a point as settled when the author replied disagreeing or
+  declining.
+
+This context is appended to the `/code-review` arguments, because `/code-review` ignores
+`--append-system-prompt`. Use `review --full` for a fresh full review.
 
 ### Working directory
 
 ```
-<workdir>/repos/<owner>/<repo>.git     bare partial clone, shared by all PRs of a repo
+<workdir>/repos/<owner>/<repo>.git     bare partial clone, shared by all PRs of a repo; keeps
+                                       refs/rocket-critic/reviewed/<N> at the last reviewed commit
 <workdir>/prs/<owner>/<repo>/<N>-<sha> worktree for one review (removed afterwards unless keep_worktrees)
 <workdir>/runs/<owner>/<repo>/<N>/     /code-review output (.md) and Claude's JSON result (.json) per commit
 <workdir>/state.db                     review history

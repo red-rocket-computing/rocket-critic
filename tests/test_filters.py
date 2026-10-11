@@ -3,7 +3,7 @@ import pytest
 from rocket_critic.config import parse
 from rocket_critic.filters import due, matches
 from rocket_critic.github import PullRequest
-from rocket_critic.state import DONE, FAILED, State
+from rocket_critic.state import ATTENTION, DONE, FAILED, SKIPPED, State
 
 
 def make_pr(**kw):
@@ -76,3 +76,45 @@ def test_reset_running(state):
     state.start("o/r", 1, "c" * 40)
     assert state.reset_running() == 1
     assert state.get("o/r", 1, "c" * 40).status == FAILED
+
+
+def test_due_settle_and_cap(state):
+    from rocket_critic.filters import NEW_HEAD, SETTLING
+
+    cfg = repo_cfg(review={"settle_seconds": 60, "max_reviews_per_pr": 1})
+    pr = make_pr()
+    assert due(pr, cfg, state, 60) == (False, SETTLING)
+    state.mark_pending("o/r", 1, pr.head_sha)
+    t = state.get("o/r", 1, pr.head_sha).updated_at
+    assert due(pr, cfg, state, 60, now=t + 30)[1].startswith("settling (")
+    assert due(pr, cfg, state, 60, now=t + 61) == (True, NEW_HEAD)
+    state.start("o/r", 1, pr.head_sha)
+    state.finish("o/r", 1, pr.head_sha, DONE)
+    ok, why = due(make_pr(head_sha="b" * 40), repo_cfg(review={"max_reviews_per_pr": 1}), state, 60)
+    assert not ok and "limit" in why
+    assert due(make_pr(head_sha="b" * 40), repo_cfg(review={"max_reviews_per_pr": 0}), state, 60)[0]
+
+
+@pytest.mark.parametrize("status", [SKIPPED, ATTENTION])
+def test_due_final_statuses(state, status):
+    pr = make_pr()
+    state.finish("o/r", 1, pr.head_sha, status, error="x")
+    assert due(pr, repo_cfg(), state, 60)[0] is False
+
+
+def test_state_migrates_old_schema(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    db = sqlite3.connect(path)
+    db.execute("""CREATE TABLE reviews (repo TEXT NOT NULL, pr INTEGER NOT NULL, head_sha TEXT NOT NULL,
+                  status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, error TEXT, cost_usd REAL,
+                  duration_ms INTEGER, num_turns INTEGER, output_path TEXT, updated_at REAL NOT NULL,
+                  PRIMARY KEY (repo, pr, head_sha))""")
+    db.execute("INSERT INTO reviews (repo, pr, head_sha, status, updated_at) VALUES ('o/r', 1, 'a', 'done', 1)")
+    db.commit()
+    db.close()
+    st = State(path)
+    assert st.get("o/r", 1, "a").phase is None
+    st.start("o/r", 1, "b")
+    assert st.get("o/r", 1, "b").phase == "checkout"

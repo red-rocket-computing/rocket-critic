@@ -12,6 +12,7 @@ from typing import Any
 
 from . import proc
 from .config import ClaudeConfig, ReviewConfig
+from .github import Thread
 
 log = logging.getLogger(__name__)
 
@@ -31,14 +32,72 @@ class ReviewResult:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-def review_prompt(number: int, review: ReviewConfig, *, comment: bool | None = None) -> str:
+MAX_THREADS_CHARS = 20_000
+
+
+def review_prompt(number: int, review: ReviewConfig, *, comment: bool | None = None, context: str = "") -> str:
+    """The ``/code-review`` command line.
+
+    Re-review context goes after the arguments: /code-review reads its
+    arguments as free text and follows it there, while it ignores
+    ``--append-system-prompt``.
+    """
     comment = review.comment if comment is None else comment
     parts = ["/code-review", str(number), review.level]
     if review.max_findings:
         parts += ["--max-findings", review.max_findings]
     if comment:
         parts.append("--comment")
-    return " ".join(parts)
+    prompt = " ".join(parts)
+    return f"{prompt}\n\n{context}" if context else prompt
+
+
+def rereview_context(last_sha: str, mode: str, threads: list[Thread]) -> str:
+    """Instructions that keep a re-review from repeating or contradicting earlier reviews.
+
+    ``mode``: "range" (``last_sha`` is an ancestor of the head: only review
+    what changed since), "rewritten" (history was rewritten: review it all)
+    or "repeat" (the same commit is being reviewed again).
+    """
+    lines = ["## Re-review context (from rocket-critic)", ""]
+    if mode == "range":
+        lines.append(
+            f"This pull request was already reviewed at commit {last_sha}. Only report findings on lines "
+            f"changed since then (see `git diff {last_sha} HEAD`). Do not report anything in code that was "
+            f"not changed after {last_sha}."
+        )
+    elif mode == "rewritten":
+        lines.append(
+            f"This pull request was already reviewed at commit {last_sha}, but that commit is not an "
+            "ancestor of the current head (history was rewritten), so review the whole pull request."
+        )
+    else:
+        lines.append(f"This commit ({last_sha}) was already reviewed; it is being reviewed again in full.")
+    if threads:
+        lines += [
+            "",
+            "Earlier review threads on this pull request. Do not repeat these findings or contradict them. "
+            "If the author replied disagreeing or declining, treat the point as settled. Do not comment "
+            "again on findings that have been fixed.",
+            "",
+        ]
+        used = 0
+        for t in threads:
+            where = f"{t.path}:{t.line}" if t.line else f"{t.path} (outdated)"
+            block = [f"- {where} ({t.author}): {_one_line(t.body)}"]
+            block += [f"  - reply ({author}): {_one_line(body)}" for author, body in t.replies]
+            text = "\n".join(block)
+            if used + len(text) > MAX_THREADS_CHARS:
+                lines.append(f"- ... {len(threads) - threads.index(t)} more thread(s) omitted")
+                break
+            lines.append(text)
+            used += len(text)
+    return "\n".join(lines)
+
+
+def _one_line(text: str, limit: int = 600) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def build_command(prompt: str, claude: ClaudeConfig) -> list[str]:
@@ -110,11 +169,13 @@ def run_review(
     review: ReviewConfig,
     *,
     comment: bool | None = None,
+    context: str = "",
 ) -> ReviewResult:
-    prompt = review_prompt(number, review, comment=comment)
+    prompt = review_prompt(number, review, comment=comment, context=context)
     cmd = build_command(prompt, claude)
     env = build_env(claude, repo)
-    log.info("%s#%d: running `%s` (model=%s)", repo, number, prompt, claude.model or "default")
+    log.info("%s#%d: running `%s`%s (model=%s)", repo, number, prompt.split("\n", 1)[0],
+             " with re-review context" if context else "", claude.model or "default")
     try:
         res = proc.run(cmd, cwd=worktree, env=env, timeout=claude.timeout, check=False)
     except proc.CommandError as exc:

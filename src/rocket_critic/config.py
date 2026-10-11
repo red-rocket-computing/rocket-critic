@@ -92,6 +92,9 @@ class ReviewConfig:
     rereview_on_push: bool = True
     max_attempts: int = 3
     keep_worktrees: bool = False
+    max_reviews_per_pr: int = 5
+    settle_seconds: int = 0
+    incremental: bool = True
 
 
 @dataclass
@@ -242,6 +245,10 @@ def _review(raw: dict[str, Any], where: str) -> ReviewConfig:
     r.rereview_on_push = _bool(raw.pop("rereview_on_push", r.rereview_on_push), f"{where}.rereview_on_push")
     r.max_attempts = _int(raw.pop("max_attempts", r.max_attempts), f"{where}.max_attempts", minimum=1)
     r.keep_worktrees = _bool(raw.pop("keep_worktrees", r.keep_worktrees), f"{where}.keep_worktrees")
+    r.max_reviews_per_pr = _int(raw.pop("max_reviews_per_pr", r.max_reviews_per_pr), f"{where}.max_reviews_per_pr",
+                                minimum=0)
+    r.settle_seconds = _int(raw.pop("settle_seconds", r.settle_seconds), f"{where}.settle_seconds", minimum=0)
+    r.incremental = _bool(raw.pop("incremental", r.incremental), f"{where}.incremental")
     if raw:
         raise ConfigError(f"{where}: unknown keys: {', '.join(sorted(raw))}")
     return r
