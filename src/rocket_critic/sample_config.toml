@@ -1,0 +1,62 @@
+# rocket-critic configuration
+#
+# rocket-critic polls the repos below, checks each pull request out under
+# `workdir`, and runs Claude Code's built-in `/code-review` command in print
+# mode inside that checkout. With `comment = true`, /code-review posts its
+# findings to the PR as inline review comments itself.
+
+workdir = "~/.local/share/rocket-critic"
+poll_interval = 300                  # seconds between polls (also the base retry backoff)
+
+[claude]
+binary = "claude"
+model = "glm-5.3:cloud"              # "" = Claude Code's default model
+timeout = 2700                       # seconds allowed per review
+permission_mode = "dontAsk"          # deny any tool not listed in allowed_tools
+# Tools /code-review may use. Anything it is denied is logged as a warning.
+# allowed_tools = ["Read", "Grep", "Glob", "Agent", "Bash(gh api:*)", ...]
+# disallowed_tools = ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
+extra_args = []                      # appended to the claude command line
+
+# Environment for the claude subprocess only. ${VAR} is expanded from
+# rocket-critic's environment; a key whose variable is unset is dropped.
+# Remove this table entirely to use your normal Claude Code login.
+[claude.env]
+# Ollama (local server, or signed in to Ollama cloud for *:cloud models)
+ANTHROPIC_BASE_URL = "http://localhost:11434"
+ANTHROPIC_AUTH_TOKEN = "ollama"
+ANTHROPIC_API_KEY = ""
+# Keep Claude Code's background and subagent calls on the same model.
+ANTHROPIC_DEFAULT_HAIKU_MODEL = "glm-5.3:cloud"
+ANTHROPIC_DEFAULT_SONNET_MODEL = "glm-5.3:cloud"
+ANTHROPIC_DEFAULT_OPUS_MODEL = "glm-5.3:cloud"
+CLAUDE_CODE_SUBAGENT_MODEL = "glm-5.3:cloud"
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
+# Identity /code-review posts as. Recommended: a fine-grained token limited to
+# the watched repos with Pull requests: read/write and Contents: read.
+GH_TOKEN = "${ROCKET_CRITIC_GH_TOKEN}"
+
+[review]
+level = "medium"                     # low | medium | high | xhigh | max
+max_findings = ""                    # "" = /code-review default, a number, or "all"
+comment = true                       # post findings as inline PR comments
+max_diff_lines = 5000                # skip PRs with more added+deleted lines (0 = no limit)
+rereview_on_push = true              # review again when new commits are pushed
+max_attempts = 3                     # retries per commit after failures
+keep_worktrees = false               # keep PR checkouts after review (debugging)
+
+[[repos]]
+name = "owner/repo"
+skip_drafts = true
+labels = []                          # only PRs with one of these labels...
+reviewers = []                       # ...or requesting review from one of these users/teams
+ignore_authors = ["dependabot[bot]", "renovate[bot]"]
+base_branches = []                   # empty = any base branch
+
+# Per-repo overrides of [claude] / [review]:
+# [repos.review]
+# level = "high"
+# [repos.claude]
+# model = "qwen3-coder:480b-cloud"
+# [repos.claude.env]                 # merged key by key over [claude.env]
+# ANTHROPIC_DEFAULT_HAIKU_MODEL = "qwen3-coder:480b-cloud"
