@@ -148,6 +148,24 @@ class GitHub:
                 thread.replies.append(((c.get("user") or {}).get("login") or "", c.get("body") or ""))
         return list(threads.values())
 
+    def review_requested_at(self, repo: str, number: int, names: list[str]) -> int | None:
+        """When review was last requested from any of ``names`` (users or teams), from the PR timeline.
+
+        Team names match on their slug or display name, with or without an ``org/`` prefix.
+        """
+        wanted = {name.lower().rsplit("/", 1)[-1] for name in names}
+        latest = None
+        for event in self._paginate(f"repos/{repo}/issues/{number}/timeline?per_page=100"):
+            if event.get("event") != "review_requested":
+                continue
+            who = event.get("requested_reviewer") or {}
+            team = event.get("requested_team") or {}
+            keys = {k.lower() for k in (who.get("login"), team.get("slug"), team.get("name")) if k}
+            if keys & wanted:
+                stamp = _ts(event.get("created_at"))
+                latest = stamp if latest is None else max(latest, stamp)
+        return latest
+
     def whoami(self, env: Mapping[str, str] | None = None) -> str | None:
         """Login of the authenticated identity, or None (e.g. an app token without /user access)."""
         try:

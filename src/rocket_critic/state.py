@@ -22,12 +22,13 @@ CREATE TABLE IF NOT EXISTS reviews (
     updated_at  REAL NOT NULL,
     started_at  REAL,                   -- when the latest attempt started
     phase       TEXT,                   -- checkout | review: how far the latest attempt got
+    done_count  INTEGER NOT NULL DEFAULT 0,  -- successful reviews of this commit (re-requests add more)
     PRIMARY KEY (repo, pr, head_sha)
 );
 """
 
 # Columns added after the first release, with their SQL types.
-_MIGRATIONS = {"started_at": "REAL", "phase": "TEXT"}
+_MIGRATIONS = {"started_at": "REAL", "phase": "TEXT", "done_count": "INTEGER NOT NULL DEFAULT 0"}
 
 PENDING = "pending"
 RUNNING = "running"
@@ -55,6 +56,7 @@ class Record:
     updated_at: float
     started_at: float | None = None
     phase: str | None = None
+    done_count: int = 0
 
 
 class State:
@@ -68,6 +70,8 @@ class State:
             for column, sql_type in _MIGRATIONS.items():
                 if column not in have:
                     self.db.execute(f"ALTER TABLE reviews ADD COLUMN {column} {sql_type}")
+            if "done_count" not in have:
+                self.db.execute("UPDATE reviews SET done_count = 1 WHERE status = ?", (DONE,))
 
     def close(self) -> None:
         self.db.close()
@@ -79,11 +83,15 @@ class State:
         return Record(**row) if row else None
 
     def any_done(self, repo: str, pr: int) -> bool:
-        return self.count_done(repo, pr) > 0
+        row = self.db.execute(
+            "SELECT 1 FROM reviews WHERE repo = ? AND pr = ? AND status = ? LIMIT 1", (repo, pr, DONE)
+        ).fetchone()
+        return row is not None
 
     def count_done(self, repo: str, pr: int) -> int:
+        """Successful reviews of ``pr``, counting repeat reviews of the same commit."""
         row = self.db.execute(
-            "SELECT COUNT(*) FROM reviews WHERE repo = ? AND pr = ? AND status = ?", (repo, pr, DONE)
+            "SELECT COALESCE(SUM(done_count), 0) FROM reviews WHERE repo = ? AND pr = ?", (repo, pr)
         ).fetchone()
         return row[0]
 
@@ -118,10 +126,12 @@ class State:
                 """INSERT INTO reviews (repo, pr, head_sha, status, attempts, updated_at, started_at, phase)
                    VALUES (?, ?, ?, ?, 1, ?, ?, ?)
                    ON CONFLICT (repo, pr, head_sha)
-                   DO UPDATE SET status = excluded.status, attempts = attempts + 1, error = NULL,
+                   DO UPDATE SET status = excluded.status, error = NULL,
+                                 -- a finished commit being reviewed again starts a fresh round of attempts
+                                 attempts = CASE WHEN status IN (?, ?, ?) THEN 1 ELSE attempts + 1 END,
                                  updated_at = excluded.updated_at, started_at = excluded.started_at,
                                  phase = excluded.phase""",
-                (repo, pr, head_sha, RUNNING, now, now, PHASE_CHECKOUT),
+                (repo, pr, head_sha, RUNNING, now, now, PHASE_CHECKOUT, DONE, SKIPPED, ATTENTION),
             )
 
     def set_phase(self, repo: str, pr: int, head_sha: str, phase: str) -> None:
@@ -147,16 +157,18 @@ class State:
         with self.db:
             self.db.execute(
                 """INSERT INTO reviews (repo, pr, head_sha, status, attempts, error, cost_usd, duration_ms,
-                                        num_turns, output_path, updated_at)
-                   VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                                        num_turns, output_path, updated_at, done_count)
+                   VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT (repo, pr, head_sha)
                    DO UPDATE SET status = excluded.status, error = excluded.error,
+                                 done_count = done_count + excluded.done_count,
                                  cost_usd = coalesce(excluded.cost_usd, cost_usd),
                                  duration_ms = coalesce(excluded.duration_ms, duration_ms),
                                  num_turns = coalesce(excluded.num_turns, num_turns),
                                  output_path = coalesce(excluded.output_path, output_path),
                                  updated_at = excluded.updated_at""",
-                (repo, pr, head_sha, status, error, cost_usd, duration_ms, num_turns, output_path, time.time()),
+                (repo, pr, head_sha, status, error, cost_usd, duration_ms, num_turns, output_path, time.time(),
+                 1 if status == DONE else 0),
             )
 
     def recent(self, repo: str | None = None, limit: int = 50) -> list[Record]:

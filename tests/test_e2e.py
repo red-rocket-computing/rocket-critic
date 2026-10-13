@@ -53,11 +53,12 @@ class Env:
         self.prs = [self.pr(1, self.pr_sha), self.pr(2, self.pr_sha, draft=True)]
         self.reviews = []
         self.comments = []
+        self.timeline = []
         self.write_gh()
         self.config = tmp / "config.toml"
         self.write_config()
 
-    def write_config(self, review=""):
+    def write_config(self, review="", repo=""):
         self.config.write_text(f"""
 workdir = "{self.workdir}"
 poll_interval = 60
@@ -70,6 +71,7 @@ GH_TOKEN = "${{RC_TOK}}"
 {review}
 [[repos]]
 name = "o/r"
+{repo}
 """)
 
     def push_pr(self, number, branch, content="print('changed')\n"):
@@ -91,7 +93,7 @@ name = "o/r"
 
     def write_gh(self):
         self.gh_data.write_text(json.dumps({
-            "prs": self.prs, "reviews": self.reviews, "comments": self.comments,
+            "prs": self.prs, "reviews": self.reviews, "comments": self.comments, "timeline": self.timeline,
             "login": "me", "logins": {"bot-token": "rc-bot"},
         }))
 
@@ -116,7 +118,8 @@ name = "o/r"
         """Pretend the state row for ``sha`` was last touched ``seconds`` ago."""
         st = self.state()
         with st.db:
-            st.db.execute("UPDATE reviews SET updated_at = updated_at - ? WHERE head_sha = ?", (seconds, sha))
+            st.db.execute("UPDATE reviews SET updated_at = updated_at - ?, started_at = started_at - ? "
+                          "WHERE head_sha = ?", (seconds, seconds, sha))
 
     def gh_calls(self):
         log = Path(str(self.gh_data) + ".log")
@@ -164,7 +167,7 @@ def test_review_one_pr(env):
 
     # Already reviewed: refused without --force.
     res = env.run("review", "o/r#1")
-    assert res.exit_code != 0 and "already done" in res.output
+    assert res.exit_code != 0 and "already reviewed at" in res.output
     res = env.run("review", "o/r#1", "--force", "--no-comment", "--level", "high")
     assert res.exit_code == 0, res.output
     prompt = env.calls()[-1]["argv"][1]
@@ -302,7 +305,7 @@ def test_failure_after_posting_is_not_retried(env, monkeypatch):
     rec = env.state().get("o/r", 1, env.pr_sha)
     assert rec.status == ATTENTION and "posting" in rec.error
     res = env.run("review", "o/r#1")
-    assert res.exit_code != 0 and "already attention" in res.output
+    assert res.exit_code != 0 and "(attention at" in res.output
 
 
 def test_failure_without_posting_is_retried(env, monkeypatch):
@@ -352,6 +355,99 @@ def test_init_workdir_then_watch_with_it(env, tmp_path):
     monkey_env = {"ROCKET_CRITIC_WORKDIR": str(wd)}
     res = CliRunner().invoke(cli, ["status"], env=monkey_env, catch_exceptions=False)
     assert "o/r#1" in res.output
+
+
+def request_review(env, login="rc-bot", at=None):
+    """Request a review from ``login`` now (or at ``at``), as GitHub records it.
+
+    A re-request made "now" ages earlier reviews by a few seconds first, since
+    GitHub timestamps have one-second resolution.
+    """
+    if at is None:
+        for rec in env.state().recent("o/r"):
+            env.age(rec.head_sha, 5)
+        at = time.time()
+    env.prs[0]["requested_reviewers"] = [{"login": login}]
+    env.timeline.append({"event": "review_requested", "requested_reviewer": {"login": login},
+                         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at))})
+    env.write_gh()
+
+
+def clear_request(env):
+    """What GitHub does when the requested reviewer posts a review."""
+    env.prs[0]["requested_reviewers"] = []
+    env.write_gh()
+
+
+def test_reviewer_trigger_rereviews_only_when_rerequested(env):
+    env.write_config(repo='reviewers = ["rc-bot"]')
+    assert env.run("watch", "--once").exit_code == 0
+    assert env.calls() == []  # nobody asked
+
+    request_review(env, at=time.time() - 60)
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 1
+    clear_request(env)
+
+    first = env.pr_sha
+    env.extend_head("print('fix')\n")  # new commits alone don't trigger a review
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 1
+
+    request_review(env)  # author clicks "Re-request review"
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 2
+    assert f"`git diff {first} HEAD`" in env.calls()[-1]["argv"][1]
+
+
+def test_rerequest_without_new_commits_reviews_again_once(env):
+    env.write_config(repo='reviewers = ["rc-bot"]')
+    request_review(env, at=time.time() - 60)
+    assert env.run("watch", "--once").exit_code == 0
+    clear_request(env)
+
+    request_review(env)  # same commit, asked again
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 2
+    assert "being reviewed again in full" in env.calls()[-1]["argv"][1]
+    rec = env.state().get("o/r", 1, env.pr_sha)
+    assert rec.status == DONE and rec.done_count == 2 and rec.attempts == 1
+
+    # The fake never clears the request, like a review that posted nothing:
+    # the request predates the last review, so it must not loop.
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 2
+
+
+def test_uncleared_request_does_not_loop(env):
+    env.write_config(repo='reviewers = ["rc-bot"]')
+    request_review(env, at=time.time() - 60)
+    for _ in range(3):
+        assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 1
+
+
+def test_rerequests_count_toward_review_limit(env):
+    env.write_config(review="max_reviews_per_pr = 2", repo='reviewers = ["rc-bot"]')
+    request_review(env, at=time.time() - 60)
+    assert env.run("watch", "--once").exit_code == 0
+    request_review(env)
+    assert env.run("watch", "--once").exit_code == 0
+    request_review(env)
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 2  # limit of 2 reached
+
+
+def test_rerequest_with_rereview_on_push_disabled(env):
+    env.write_config(review="rereview_on_push = false", repo='reviewers = ["rc-bot"]')
+    request_review(env, at=time.time() - 60)
+    assert env.run("watch", "--once").exit_code == 0
+    env.extend_head("print('fix')\n")
+    assert env.run("watch", "--once").exit_code == 0  # still requested, but not re-requested
+    assert len(env.calls()) == 1
+    request_review(env)
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 2
 
 
 def test_clean_and_init(env, tmp_path):

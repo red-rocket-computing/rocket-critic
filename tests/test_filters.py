@@ -116,5 +116,6 @@ def test_state_migrates_old_schema(tmp_path):
     db.close()
     st = State(path)
     assert st.get("o/r", 1, "a").phase is None
+    assert st.count_done("o/r", 1) == 1
     st.start("o/r", 1, "b")
     assert st.get("o/r", 1, "b").phase == "checkout"

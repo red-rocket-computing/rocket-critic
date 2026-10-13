@@ -105,7 +105,7 @@ table. Keys in `[repos.claude.env]` are merged one by one over `[claude.env]`.
 - It is open, it is not a draft (unless `skip_drafts = false`), and its author is not in `ignore_authors`.
 - If you set `base_branches`, it targets one of them.
 - If you set `labels` or `reviewers`, it has one of those labels or requests review from one of those
-  users or teams.
+  users or teams. The two differ after the first review (see below).
 - Its added plus deleted lines are at most `max_diff_lines`. A PR over the limit is recorded as `skipped`
   for that commit, so later polls don't fetch it again until the next push.
 - Its head commit has not been reviewed yet. A push triggers a new review unless `rereview_on_push = false`.
@@ -113,6 +113,18 @@ table. Keys in `[repos.claude.env]` are merged one by one over `[claude.env]`.
   with an automated fixer that pushes in response to review comments.
 - If `settle_seconds` is set, the head has been unchanged for that long. A burst of pushes then gets one
   review of the last commit.
+
+#### Label vs. reviewer triggers
+
+A label stays on the PR, so with `labels` every push is reviewed again (up to `max_reviews_per_pr`).
+
+A review request works like asking a person. GitHub drops the request once that reviewer posts a review, so
+later pushes are **not** reviewed until someone clicks *Re-request review*. A re-request triggers a review
+even without new commits: an incremental one after new commits, otherwise a full one of the same commit.
+Either way the earlier review threads are passed along. To tell a re-request from a request that is still
+open because a review posted nothing, rocket-critic checks the PR timeline (one API call, only for such
+PRs) and acts only on a request made after its last review started. Repeat reviews count toward
+`max_reviews_per_pr`.
 
 `status` shows each commit's outcome: `pending` (settling), `running`, `done`, `failed` (will be retried),
 `skipped` (too large) or `attention` (see below). `review --force` overrides all of them.

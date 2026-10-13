@@ -16,7 +16,7 @@ from . import filters, proc
 from .config import RepoConfig, Settings
 from .github import GitHub, PullRequest
 from .runner import ReviewError, build_env, rereview_context, run_review
-from .state import ATTENTION, DONE, FAILED, PHASE_REVIEW, SKIPPED, State
+from .state import ATTENTION, DONE, FAILED, PHASE_REVIEW, SKIPPED, Record, State
 from .workspace import Workspace
 
 log = logging.getLogger(__name__)
@@ -167,6 +167,22 @@ class Critic:
         log.warning("%s: %s; not retrying to avoid duplicate comments", pr.ref, reason)
         return False
 
+    def rerequested_since(self, pr: PullRequest, repo: RepoConfig, last: Record) -> bool:
+        """Whether a configured reviewer's review was requested after ``last`` review started.
+
+        GitHub drops a review request once that reviewer posts, so a request that is
+        open after our review is normally a re-request. Comparing against the timeline
+        guards against a review that posted nothing and so never cleared the request.
+        """
+        names = filters.requested_reviewers(pr, repo)
+        try:
+            requested_at = self.gh.review_requested_at(pr.repo, pr.number, names)
+        except (proc.CommandError, ValueError) as exc:
+            log.warning("%s: could not read the PR timeline: %s", pr.ref, exc)
+            return False
+        since = last.started_at or last.updated_at
+        return requested_at is not None and requested_at > since
+
     def candidates(self, repo: RepoConfig) -> Iterator[PullRequest]:
         for pr in self.gh.list_open_prs(repo.name):
             ok, why = filters.should_review(pr, repo, self.state, retry_base=self.settings.poll_interval)
@@ -176,8 +192,11 @@ class Critic:
                 self.state.mark_pending(pr.repo, pr.number, pr.head_sha)
                 continue
             if not ok:
-                log.debug("%s: skip (%s)", pr.ref, why)
-                continue
+                last = filters.rerequest_candidate(pr, repo, self.state, why)
+                if last is None or not self.rerequested_since(pr, repo, last):
+                    log.debug("%s: skip (%s)", pr.ref, why)
+                    continue
+                why = filters.REREQUESTED
             if why.startswith(filters.RETRY) and not self.retry_is_safe(pr, repo):
                 continue
             if pr.size is None:
