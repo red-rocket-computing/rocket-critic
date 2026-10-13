@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import re
 import shutil
 import sys
@@ -18,6 +19,7 @@ from .config import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_WORKDIR,
     LEVELS,
+    ClaudeConfig,
     ConfigError,
     Settings,
     add_repo,
@@ -170,6 +172,49 @@ def add_repo_cmd(ctx: Ctx, name: str, labels: tuple[str, ...], reviewers: tuple[
     click.echo(f"{what} {name} in {s.path}" + (f"; created {len(created)} directories" if created else ""))
 
 
+_TOKEN_KINDS = {
+    "github_pat_": "fine-grained token",
+    "ghp_": "classic token",
+    "gho_": "OAuth token",
+    "ghu_": "GitHub App user token",
+    "ghs_": "GitHub App installation token",
+}
+
+
+def describe_token(claude: ClaudeConfig) -> tuple[bool, str]:
+    """Where the claude subprocess's GitHub token comes from, never showing the token itself.
+
+    Returns ``(False, why)`` when [claude.env] sets one that does not resolve.
+    """
+    for key in ("GH_TOKEN", "GITHUB_TOKEN"):
+        missing = claude.unresolved_env().get(key)
+        if missing:
+            names = ", ".join(f"${name}" for name in missing)
+            return False, (f"[claude.env] {key} uses {names}, which is not set (or empty) in this shell, "
+                           "so your gh login is used instead; export it before running rocket-critic")
+    env = claude.resolved_env()
+    for key in ("GH_TOKEN", "GITHUB_TOKEN"):
+        token = env.get(key) if key in claude.env else None
+        source = "[claude.env]"
+        if token is None and os.environ.get(key):
+            token, source = os.environ[key], "the environment"
+        if token:
+            kind = next((v for k, v in _TOKEN_KINDS.items() if token.startswith(k)), "token")
+            return True, f"{key} from {source} ({kind})"
+    return True, "none set; /code-review uses your gh login"
+
+
+def warn_unresolved_env(settings: Settings) -> None:
+    """Log [claude.env] entries dropped because a ${VAR} they use is unset."""
+    seen = set()
+    for repo in settings.repos or [settings.repo("example/example")]:
+        for key, names in repo.claude.unresolved_env().items():
+            if (key, tuple(names)) not in seen:
+                seen.add((key, tuple(names)))
+                log.warning("[claude.env] %s skipped: %s not set or empty", key,
+                            ", ".join(f"${n}" for n in names))
+
+
 @cli.command()
 @pass_ctx
 def doctor(ctx: Ctx) -> None:
@@ -188,6 +233,7 @@ def doctor(ctx: Ctx) -> None:
         report(shutil.which(tool) is not None, f"{tool} on PATH", shutil.which(tool) or "not found")
 
     gh = GitHub()
+    gh_login = gh.whoami()
     authed, status = gh.auth_status()
     report(authed, "gh auth status", " ".join(status.split())[:160])
 
@@ -226,8 +272,13 @@ def doctor(ctx: Ctx) -> None:
         except Exception as exc:  # noqa: BLE001 - doctor reports everything
             report(False, label, str(exc))
 
+        token_ok, token_detail = describe_token(c)
+        report(token_ok, "GitHub token for /code-review", token_detail)
         login = gh.whoami(env=env)
-        report(login is not None, "/code-review will post as", login or "unknown (gh api user failed)")
+        detail = login or "unknown (gh api user failed)"
+        if login and gh_login and login.lower() == gh_login.lower() and token_ok and not token_detail.startswith("none"):
+            detail += " (the token belongs to your own account; post as another name with a separate account's token)"
+        report(login is not None, "/code-review will post as", detail)
 
     if not ok:
         sys.exit(1)
@@ -245,6 +296,7 @@ def watch(ctx: Ctx, once: bool, only: tuple[str, ...]) -> None:
         raise click.ClickException("no repos configured")
     try:
         with lock(s.workdir):
+            warn_unresolved_env(s)
             critic = Critic(s)
             critic.install_signal_handlers()
             log.info("watching %s every %ss", ", ".join(r.name for r in repos), s.poll_interval)
@@ -273,6 +325,7 @@ def review(ctx: Ctx, pr_ref: str, level: str | None, model: str | None, comment:
         repo.review.level = level
     if model:
         repo.claude.model = model
+    warn_unresolved_env(s)
     critic = Critic(s)
     try:
         pr = critic.gh.get_pr(repo.name, number)

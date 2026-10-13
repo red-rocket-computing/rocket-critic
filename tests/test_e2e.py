@@ -487,6 +487,39 @@ def test_add_repo_replaces_sample_placeholder(env, tmp_path):
     assert [r.name for r in load(wd / "config.toml").repos] == ["o/r", "o/two"]
 
 
+def doctor_line(output, label):
+    return next(line for line in output.splitlines() if label in line)
+
+
+def test_doctor_reports_token_source(env, monkeypatch):
+    out = env.run("doctor").output
+    assert "[ok  ]" in doctor_line(out, "GitHub token") and "GH_TOKEN from [claude.env] (token)" in out
+    assert doctor_line(out, "will post as").endswith("rc-bot")
+
+    monkeypatch.delenv("RC_TOK")  # the configured ${RC_TOK} isn't exported
+    out = env.run("doctor").output
+    line = doctor_line(out, "GitHub token")
+    assert "[FAIL]" in line and "$RC_TOK" in line and "not set" in line
+    assert doctor_line(out, "will post as").endswith("me")
+
+    monkeypatch.setenv("RC_TOK", "")  # exported but empty counts as unset
+    assert "[FAIL]" in doctor_line(env.run("doctor").output, "GitHub token")
+
+
+def test_doctor_flags_token_of_own_account(env, monkeypatch):
+    monkeypatch.setenv("RC_TOK", "github_pat_mine")  # fake gh maps unknown tokens to the gh login
+    out = env.run("doctor").output
+    assert "(fine-grained token)" in doctor_line(out, "GitHub token")
+    assert "belongs to your own account" in doctor_line(out, "will post as")
+
+
+def test_watch_warns_about_unset_env_ref(env, monkeypatch, caplog):
+    monkeypatch.delenv("RC_TOK")
+    assert env.run("watch", "--once").exit_code == 0
+    assert "[claude.env] GH_TOKEN skipped: $RC_TOK not set or empty" in caplog.text
+    assert "GH_TOKEN" not in env.calls()[0]["env"]
+
+
 def test_clean_and_init(env, tmp_path):
     cfg = tmp_path / "new" / "config.toml"
     res = CliRunner().invoke(cli, ["-c", str(cfg), "init"])

@@ -75,18 +75,27 @@ class ClaudeConfig:
     def resolved_env(self, environ: dict[str, str] | None = None) -> dict[str, str]:
         """``env`` with ``${VAR}`` references expanded.
 
-        A value that references an unset variable is dropped entirely, so an
-        optional ``GH_TOKEN = "${ROCKET_CRITIC_GH_TOKEN}"`` falls back to the
-        normal gh login instead of becoming an empty token. Literal empty
+        A value that references an unset or empty variable is dropped entirely,
+        so an optional ``GH_TOKEN = "${ROCKET_CRITIC_GH_TOKEN}"`` falls back to
+        the normal gh login instead of becoming an empty token. Literal empty
         values (e.g. ``ANTHROPIC_API_KEY = ""``) are kept.
         """
         environ = os.environ if environ is None else environ
         out: dict[str, str] = {}
         for key, value in self.env.items():
-            missing = [name for name in _ENV_REF_RE.findall(value) if name not in environ]
-            if missing:
+            if key in self.unresolved_env(environ):
                 continue
             out[key] = _ENV_REF_RE.sub(lambda m: environ[m.group(1)], value)
+        return out
+
+    def unresolved_env(self, environ: dict[str, str] | None = None) -> dict[str, list[str]]:
+        """Keys of ``env`` dropped by :meth:`resolved_env`, with the unset or empty variables they reference."""
+        environ = os.environ if environ is None else environ
+        out: dict[str, list[str]] = {}
+        for key, value in self.env.items():
+            missing = [name for name in _ENV_REF_RE.findall(value) if not environ.get(name)]
+            if missing:
+                out[key] = missing
         return out
 
 

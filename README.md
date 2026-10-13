@@ -227,6 +227,28 @@ injection. rocket-critic limits what such a PR can do:
   *Contents: read*. A hijacked review can then do no more than post PR comments. rocket-critic uses your
   normal `gh` login for its own polling and cloning.
 
+#### Setting up the review token
+
+The sample config reads the token from an environment variable:
+
+```toml
+[claude.env]
+GH_TOKEN = "${ROCKET_CRITIC_GH_TOKEN}"
+```
+
+Export it in the shell (or service) that runs rocket-critic: `export ROCKET_CRITIC_GH_TOKEN=github_pat_...`.
+If the variable is unset or empty, the `GH_TOKEN` line is skipped and `/code-review` falls back to your `gh`
+login. `watch` and `review` log a warning when this happens, and `doctor` shows where the token comes from:
+
+```
+[ok  ] GitHub token for /code-review: GH_TOKEN from [claude.env] (fine-grained token)
+[ok  ] /code-review will post as: my-review-bot
+```
+
+Reviews post under the account that owns the token. A token you create on your own account still posts as
+you; to post under another name, create the token on a separate GitHub account (a "machine user") that has
+access to the repos. `doctor` points this out when the token's account is the same as your `gh` login.
+
 If `/code-review` needs a tool that is not on the allowlist, the call is denied and logged as a warning
 that names the tool. Add the tool to `allowed_tools` if you trust it.
 
