@@ -22,10 +22,13 @@ LEVELS = ("low", "medium", "high", "xhigh", "max")
 CONFIG_NAME = "config.toml"
 DEFAULT_WORKDIR = "~/.local/share/rocket-critic"
 
-DEFAULT_CONFIG_PATH = Path(
-    os.environ.get("ROCKET_CRITIC_CONFIG")
-    or Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "rocket-critic" / "config.toml"
-)
+
+def user_config_path() -> Path:
+    """``$XDG_CONFIG_HOME/rocket-critic/config.toml`` (default ``~/.config/rocket-critic/config.toml``)."""
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "rocket-critic" / CONFIG_NAME
+
+
+DEFAULT_CONFIG_PATH = user_config_path()
 
 DEFAULT_ALLOWED_TOOLS = [
     "Read",
@@ -140,22 +143,48 @@ class Settings:
 
 
 def config_path(path: Path | None = None, workdir: Path | None = None) -> Path:
-    """The config file to use: ``path``, else ``<workdir>/config.toml``, else the default."""
+    """Where ``init`` writes the config: ``path``, else ``<workdir>/config.toml``, else the user config."""
     if path:
         return Path(path).expanduser()
     if workdir:
         return Path(workdir).expanduser() / CONFIG_NAME
-    return DEFAULT_CONFIG_PATH
+    return user_config_path()
+
+
+def config_candidates(workdir: Path | None = None, cwd: Path | None = None) -> list[Path]:
+    """Config files searched, in order: the workdir, the current directory, the user config directory."""
+    paths = []
+    if workdir:
+        paths.append(Path(workdir).expanduser() / CONFIG_NAME)
+    paths.append(Path(cwd or Path.cwd()) / CONFIG_NAME)
+    paths.append(user_config_path())
+    unique: list[Path] = []
+    for p in paths:
+        if all(p.resolve() != q.resolve() for q in unique):
+            unique.append(p)
+    return unique
+
+
+def find_config(path: Path | None = None, workdir: Path | None = None, cwd: Path | None = None) -> Path:
+    """``path`` if given, else the first existing file from :func:`config_candidates`."""
+    if path:
+        return Path(path).expanduser()
+    candidates = config_candidates(workdir, cwd)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    tried = ", ".join(str(c) for c in candidates)
+    raise ConfigError(f"no config file found (looked for {tried}); run `rocket-critic init`")
 
 
 def load(path: Path | None = None, workdir: Path | None = None) -> Settings:
-    """Load the config chosen by :func:`config_path`.
+    """Load the config chosen by :func:`find_config`.
 
     A relative ``workdir`` in the file is relative to the file's directory, so
     ``workdir = "."`` keeps a config next to its repo/PR directories. An
     explicit ``workdir`` argument overrides the file's value.
     """
-    path = config_path(path, workdir)
+    path = find_config(path, workdir)
     try:
         with open(path, "rb") as fh:
             data = tomllib.load(fh)

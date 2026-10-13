@@ -64,8 +64,9 @@ pass_ctx = click.make_pass_decorator(Ctx)
 
 
 @click.group()
-@click.option("-c", "--config", "config_path", type=click.Path(path_type=Path),
-              help=f"Config file (default WORKDIR/{CONFIG_NAME} with -w, else {DEFAULT_CONFIG_PATH}).")
+@click.option("-c", "--config", "config_path", type=click.Path(path_type=Path), envvar="ROCKET_CRITIC_CONFIG",
+              help=f"Config file. Default: the first of WORKDIR/{CONFIG_NAME} (with -w), ./{CONFIG_NAME} and "
+                   f"{DEFAULT_CONFIG_PATH}. Env: ROCKET_CRITIC_CONFIG.")
 @click.option("-w", "--workdir", type=click.Path(file_okay=False, path_type=Path), envvar="ROCKET_CRITIC_WORKDIR",
               help="Working directory holding the config file and the repo/PR checkouts "
                    "(overrides the config's workdir). Env: ROCKET_CRITIC_WORKDIR.")

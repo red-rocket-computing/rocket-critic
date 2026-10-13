@@ -106,3 +106,53 @@ def test_sample_config_fills_workdir_and_repos():
     assert s.repos[1].ignore_authors == ["dependabot[bot]", "renovate[bot]"]
     with pytest.raises(ConfigError):
         sample_config(".", ["nope"])
+
+
+@pytest.fixture
+def places(tmp_path, monkeypatch):
+    """A workdir, a current directory and a user config directory, each able to hold a config."""
+    wd, cwd, xdg = tmp_path / "wd", tmp_path / "cwd", tmp_path / "xdg"
+    for d in (wd, cwd, xdg / "rocket-critic"):
+        d.mkdir(parents=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    monkeypatch.chdir(cwd)
+
+    def write(where, poll):
+        path = {"wd": wd, "cwd": cwd, "user": xdg / "rocket-critic"}[where] / "config.toml"
+        path.write_text(f"poll_interval = {poll}\n")
+        return path
+
+    return wd, write
+
+
+def test_config_search_order(places):
+    from rocket_critic.config import load
+
+    wd, write = places
+    user = write("user", 30)
+    assert load().path == user and load(workdir=wd).path == user
+    here = write("cwd", 20)
+    assert load().path == here and load(workdir=wd).path == here
+    work = write("wd", 10)
+    assert load(workdir=wd).path == work and load(workdir=wd).poll_interval == 10
+    assert load().path == here  # without -w the workdir isn't searched
+    assert load(user).path == user  # an explicit -c always wins
+
+
+def test_config_search_without_any_file(places):
+    from rocket_critic.config import load
+
+    wd, _ = places
+    with pytest.raises(ConfigError, match="no config file found") as exc:
+        load(workdir=wd)
+    msg = str(exc.value)
+    assert msg.index(str(wd)) < msg.index("cwd") < msg.index("xdg")
+
+
+def test_cwd_config_relative_workdir(places):
+    from rocket_critic.config import load
+
+    _, write = places
+    here = write("cwd", 20)
+    here.write_text('workdir = "state"\n')
+    assert load().workdir == (here.parent / "state").resolve()

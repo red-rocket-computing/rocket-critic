@@ -61,11 +61,19 @@ rocket-critic -w ~/critic watch
 
 Global options:
 
-- `-w/--workdir DIR` (or `$ROCKET_CRITIC_WORKDIR`): the working directory. Its `config.toml` is the config
-  file unless `-c` is given, and it holds the repo and PR checkouts, overriding the config's `workdir`.
-- `-c/--config PATH` (or `$ROCKET_CRITIC_CONFIG`): the config file. Defaults to `DIR/config.toml` with
-  `-w`, else `~/.config/rocket-critic/config.toml`.
+- `-w/--workdir DIR` (or `$ROCKET_CRITIC_WORKDIR`): the working directory. It holds the repo and PR
+  checkouts, overriding the config's `workdir`, and is the first place searched for the config file.
+- `-c/--config PATH` (or `$ROCKET_CRITIC_CONFIG`): use this config file and skip the search.
 - `-v/--verbose`: debug logging.
+
+Without `-c`, the config file is the first of these that exists:
+
+1. `DIR/config.toml`, with `-w DIR`
+2. `./config.toml` in the current directory
+3. `~/.config/rocket-critic/config.toml` (`$XDG_CONFIG_HOME/rocket-critic/config.toml` if set)
+
+`doctor` prints which file it loaded. `init` writes to `-c PATH`, else `DIR/config.toml` with `-w`, else
+the user config directory.
 
 ## Configuration
 
