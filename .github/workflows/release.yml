@@ -1,0 +1,126 @@
+# Release rocket-critic: push a tag matching the package version, e.g.
+#
+#   git tag -a v0.2.0 -m "rocket-critic 0.2.0" && git push origin v0.2.0
+#
+# The tag must equal "v" + __version__ in src/rocket_critic/__init__.py. Tags with
+# a suffix (v0.2.0-rc1) become pre-releases. Running the workflow by hand
+# (Actions → Release → Run workflow) checks, tests and builds without publishing.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check-version:
+    name: Check tag against version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: Read the package version
+        run: |
+          version=$(python3 -c 'import re; print(re.search(r"__version__ = \"([^\"]+)\"", open("src/rocket_critic/__init__.py").read())[1])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Package version: $version"
+      - name: Tag must match the version
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # Accept v1.2.3 for 1.2.3, and v1.2.3-rc1 / v1.2.3rc1 for 1.2.3rc1.
+          normalized=$(echo "${TAG#v}" | sed -E 's/-(a|b|rc|alpha|beta)\.?/\1/')
+          if [ "$normalized" != "$VERSION" ]; then
+            echo "::error::Tag $TAG does not match __version__ $VERSION in src/rocket_critic/__init__.py"
+            exit 1
+          fi
+
+  test:
+    name: Test (Python ${{ matrix.python }})
+    needs: check-version
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: python -m pip install -e '.[dev]'
+      - name: Configure git for the tests
+        run: |
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "CI"
+      - name: Run tests
+        run: python -m pytest -q
+
+  build:
+    name: Build distributions
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install build
+          python -m build
+      - name: Check the wheel installs and runs
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install dist/*.whl
+          /tmp/smoke/bin/rocket-critic --version
+          /tmp/smoke/bin/rocket-critic -w /tmp/smoke/work init --repo owner/example
+          grep -q 'name = "owner/example"' /tmp/smoke/work/config.toml
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: [check-version, build]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.check-version.outputs.version }}
+        run: |
+          flags=()
+          case "$TAG" in *-*|*a[0-9]*|*b[0-9]*|*rc[0-9]*) flags+=(--prerelease) ;; esac
+          gh release create "$TAG" dist/* \
+            --title "rocket-critic $VERSION" \
+            --generate-notes \
+            --verify-tag \
+            "${flags[@]}"

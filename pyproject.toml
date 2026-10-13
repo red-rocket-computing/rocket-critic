@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rocket-critic"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Watch GitHub repos for pull requests and review them with Claude Code's /code-review"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -16,6 +16,14 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 rocket-critic = "rocket_critic.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/sgstreet/rocket-critic"
+Issues = "https://github.com/sgstreet/rocket-critic/issues"
+
+[tool.hatch.version]
+# The single source of the version; the release workflow checks the tag against it.
+path = "src/rocket_critic/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rocket_critic"]
