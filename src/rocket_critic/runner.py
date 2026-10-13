@@ -41,6 +41,9 @@ def posting_notes(scratch: Path) -> str:
         "## Working notes (from rocket-critic)",
         "",
         "- The current directory is the pull request checkout: run git here, without `git -C`.",
+        "- Use the Read, Grep and Glob tools to look at files; `ls`, `grep`, `cat`, `head` and similar",
+        "  shell commands are not available. Don't build, test or run the project (make, scripts,",
+        "  package managers): that is blocked, so review by reading the code.",
         "- Shell heredocs and quoted strings containing backticks or `$(...)` are blocked, and review",
         "  comments usually contain backticks. To send a JSON body to the GitHub API, write it with the",
         f"  Write tool to a new file in {scratch}/ (e.g. {scratch}/comment-1.json) and pass that file:",
@@ -235,7 +238,9 @@ def run_review(
         result.is_error = True
     if result.permission_denials:
         log.warning(
-            "%s#%d: claude was denied %d tool call(s): %s -- add them to claude.allowed_tools if needed",
+            "%s#%d: claude was denied %d tool call(s), and continued without them: %s -- only add a command "
+            "to claude.allowed_tools if it can neither run code from the PR nor read files outside the "
+            "checkout",
             repo, number, len(result.permission_denials), "; ".join(result.permission_denials),
         )
     return result

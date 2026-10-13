@@ -385,8 +385,19 @@ injection. rocket-critic limits what such a PR can do:
   write* and *Contents: read*. A hijacked review can then do no more than post PR comments.
   rocket-critic uses your normal `gh` login for its own polling and cloning.
 
-If `/code-review` needs a tool that is not on the allowlist, the call is denied and logged as a warning
-that names the tool. Add the tool to `allowed_tools` if you trust it.
+If `/code-review` tries a tool that is not on the allowlist, the call is denied and logged as a warning
+that names the command. The review carries on without it. Many such denials are expected and should stay
+denied:
+
+- **Build and test commands** (`make`, `npm`, `cargo`, `pytest`, scripts from the repo). They run code from
+  the PR, and so does `make -n`, through `$(shell ...)` and `+` lines.
+- **Shell file commands** (`ls`, `cat`, `head`, `grep`, `find`). The Read, Grep and Glob tools do the same
+  job but are confined to the checkout; the shell versions can read anything you can, such as `~/.ssh`,
+  the GitHub App key or the gh token, and a prompt-injected review could post what it reads.
+
+Only add a command to `allowed_tools` if it can neither run code from the PR nor read files outside the
+checkout. The notes rocket-critic adds to `/code-review`'s arguments steer it to the right tools, which
+keeps such denials rare.
 
 **Why comments are posted from files.** In `dontAsk` mode, Claude Code refuses shell commands it can't
 check statically, whatever the allowlist says. That includes heredocs and quoted strings containing
