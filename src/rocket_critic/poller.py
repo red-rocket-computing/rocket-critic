@@ -5,8 +5,10 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import os
 import signal
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,10 +19,27 @@ from .config import RepoConfig, Settings
 from .ghapp import GitHubApp, GitHubAppError
 from .github import GitHub, PullRequest
 from .runner import ReviewError, build_env, rereview_context, run_review
+from .github import _ts
 from .state import ATTENTION, DONE, FAILED, PHASE_REVIEW, SKIPPED, Record, State
 from .workspace import Workspace
 
 log = logging.getLogger(__name__)
+
+
+# Who may request a review with a comment: people with write access.
+COMMAND_AUTHORS = {"OWNER", "MEMBER", "COLLABORATOR"}
+# Re-read this many seconds of comments each poll, in case one was slow to appear.
+COMMENT_OVERLAP = 300
+
+
+def is_command(body: str, commands: list[str]) -> bool:
+    """Whether a line of ``body`` is, or starts with, one of ``commands`` (case-insensitive)."""
+    wanted = [c.strip().lower() for c in commands if c.strip()]
+    for line in body.splitlines():
+        line = line.strip().lower()
+        if any(line == c or line.startswith(c + " ") for c in wanted):
+            return True
+    return False
 
 
 class AlreadyRunning(RuntimeError):
@@ -50,6 +69,12 @@ class Critic:
         """Whether /code-review posts as the GitHub App for ``repo`` (a token in [claude.env] wins)."""
         explicit = repo.claude.resolved_env()
         return self.app is not None and "GH_TOKEN" not in explicit and "GITHUB_TOKEN" not in explicit
+
+    def poster(self, repo: RepoConfig) -> GitHub:
+        """``gh`` acting as the identity /code-review posts as (for reactions and label removal)."""
+        if self.uses_app(repo):
+            return GitHub(self.gh.gh, env={**os.environ, "GH_TOKEN": self.app.token(repo.name)})
+        return GitHub(self.gh.gh, env=build_env(repo.claude, repo.name))
 
     def app_env(self, repo: RepoConfig) -> dict[str, str]:
         """GH_TOKEN for the claude subprocess: a fresh installation token limited to the repo."""
@@ -114,6 +139,7 @@ class Critic:
                 self.ws.mark_reviewed(pr.repo, pr.number, pr.head_sha)
             except proc.CommandError as exc:
                 log.warning("%s: could not record reviewed commit: %s", pr.ref, exc)
+            self.clear_request_labels(pr, repo)
         else:
             log.error("%s: claude reported an error: %s", pr.ref, error)
         return Outcome(pr, status, error or "", output_path)
@@ -190,24 +216,92 @@ class Critic:
         log.warning("%s: %s; not retrying to avoid duplicate comments", pr.ref, reason)
         return False
 
-    def rerequested_since(self, pr: PullRequest, repo: RepoConfig, last: Record) -> bool:
-        """Whether a configured reviewer's review was requested after ``last`` review started.
+    def clear_request_labels(self, pr: PullRequest, repo: RepoConfig) -> None:
+        """In request label mode, take the trigger labels off after a review, so adding one asks again."""
+        labels = filters.request_labels(pr, repo)
+        if not labels:
+            return
+        try:
+            poster = self.poster(repo)
+            for label in labels:
+                poster.remove_label(pr.repo, pr.number, label)
+            log.info("%s: removed label(s) %s", pr.ref, ", ".join(labels))
+        except (proc.CommandError, GitHubAppError) as exc:
+            log.warning("%s: could not remove label(s) %s: %s", pr.ref, ", ".join(labels), exc)
 
-        GitHub drops a review request once that reviewer posts, so a request that is
-        open after our review is normally a re-request. Comparing against the timeline
-        guards against a review that posted nothing and so never cleared the request.
+    def rerequested_since(self, pr: PullRequest, repo: RepoConfig, last: Record) -> bool:
+        """Whether a review was asked for again after ``last`` review started: a configured
+        reviewer requested, or (request label mode) a configured label added.
+
+        GitHub drops a review request once that reviewer posts, and request-mode labels are
+        removed after a review, so either one being present is normally a new request.
+        Comparing against the timeline guards against one left over because a review posted
+        nothing or the label could not be removed.
         """
         names = filters.requested_reviewers(pr, repo)
+        labels = filters.request_labels(pr, repo)
         try:
-            requested_at = self.gh.review_requested_at(pr.repo, pr.number, names)
+            requested_at = self.gh.requested_at(pr.repo, pr.number, names, labels)
         except (proc.CommandError, ValueError) as exc:
             log.warning("%s: could not read the PR timeline: %s", pr.ref, exc)
             return False
         since = last.started_at or last.updated_at
         return requested_at is not None and requested_at > since
 
+    def comment_requests(self, repo: RepoConfig, prs: list[PullRequest]) -> dict[int, dict]:
+        """New review commands in PR comments, by PR number (the newest comment per PR).
+
+        Only lines starting with one of ``repo.commands``, by people with write access, posted
+        after rocket-critic started watching comments for this repo; each comment is used once.
+        """
+        if not repo.commands:
+            return {}
+        started, last_poll = self.state.comment_watch(repo.name)
+        polled = time.time()
+        try:
+            comments = self.gh.issue_comments_since(repo.name, max(started, last_poll - COMMENT_OVERLAP))
+        except (proc.CommandError, ValueError) as exc:
+            log.warning("%s: could not read PR comments: %s", repo.name, exc)
+            return {}
+        open_prs = {pr.number for pr in prs}
+        me = (self.identity(repo) or "").lower()
+        found: dict[int, dict] = {}
+        for c in comments:
+            number = int(str(c.get("issue_url", "")).rsplit("/", 1)[-1] or 0)
+            login = ((c.get("user") or {}).get("login") or "").lower()
+            if (number not in open_prs or self.state.comment_handled(repo.name, c["id"])
+                    or _ts(c.get("created_at")) < int(started) or login == me
+                    or c.get("author_association") not in COMMAND_AUTHORS
+                    or not is_command(c.get("body") or "", repo.commands)):
+                continue
+            found[number] = c
+        self.state.set_comment_poll(repo.name, polled)
+        return found
+
+    def answer_comment(self, repo: RepoConfig, comment: dict, content: str) -> None:
+        self.state.mark_comment_handled(repo.name, comment["id"])
+        try:
+            self.poster(repo).react(repo.name, comment["id"], content)
+        except (proc.CommandError, GitHubAppError) as exc:
+            log.warning("%s: could not react to comment %s: %s", repo.name, comment["id"], exc)
+
     def candidates(self, repo: RepoConfig) -> Iterator[PullRequest]:
-        for pr in self.gh.list_open_prs(repo.name):
+        prs = self.gh.list_open_prs(repo.name)
+        commanded = self.comment_requests(repo, prs)
+        for pr in prs:
+            comment = commanded.get(pr.number)
+            if comment is not None:
+                who = (comment.get("user") or {}).get("login") or "?"
+                pr = self.gh.get_pr(pr.repo, pr.number)
+                ok, why = filters.command_check(pr, repo, self.state)
+                if not ok:
+                    log.info("%s: %s asked for a review in a comment, but not reviewing (%s)", pr.ref, who, why)
+                    self.answer_comment(repo, comment, "confused")
+                    continue
+                self.answer_comment(repo, comment, "eyes")
+                log.info("%s: queued (%s by %s) %s", pr.ref, why, who, pr.title)
+                yield pr
+                continue
             ok, why = filters.should_review(pr, repo, self.state, retry_base=self.settings.poll_interval)
             if why == filters.SETTLING:
                 log.info("%s: new head %s; waiting %ss for it to settle", pr.ref, pr.head_sha[:7],

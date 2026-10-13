@@ -66,6 +66,8 @@ def test_env_expansion_drops_unset_refs():
     ({"poll_interval": 1}, "poll_interval"),
     ({"review": {"max_reviews_per_pr": -1}}, "max_reviews_per_pr"),
     ({"review": {"incremental": "yes"}}, "incremental"),
+    ({"repos": [{"name": "o/r", "label_mode": "once"}]}, "label_mode"),
+    ({"repos": [{"name": "o/r", "commands": [" "]}]}, "commands"),
     ({"github_app": {"private_key": "k.pem"}}, "app_id"),
     ({"github_app": {"app_id": 1}}, "private_key"),
     ({"github_app": {"app_id": 1, "private_key": "k", "extra": 1}}, "unknown keys"),

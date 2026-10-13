@@ -96,6 +96,8 @@ name = "o/r"
     def write_gh(self):
         self.gh_data.write_text(json.dumps({
             "prs": self.prs, "reviews": self.reviews, "comments": self.comments, "timeline": self.timeline,
+            "issue_comments": getattr(self, "issue_comments", []),
+            "reactions": getattr(self, "reactions", []), "removed_labels": getattr(self, "removed_labels", []),
             "login": "me", "logins": {"bot-token": "rc-bot"},
         }))
 
@@ -104,6 +106,13 @@ name = "o/r"
         self.prs[0]["head"]["sha"] = sha
         self.write_gh()
         return sha
+
+    def reload_gh(self):
+        """Pick up changes the fake gh made (removed labels, reactions)."""
+        data = json.loads(self.gh_data.read_text())
+        self.prs, self.reactions = data["prs"], data.get("reactions", [])
+        self.removed_labels = data.get("removed_labels", [])
+        return data
 
     def extend_head(self, content):
         """Add a commit on top of the PR's current head (a normal follow-up push)."""
@@ -599,6 +608,132 @@ def test_doctor_flags_placeholder_repo(env, tmp_path):
     assert "sample placeholder" in doctor_line(out, "repo owner/repo") and "add-repo" in out
     assert "list PRs in owner/repo" not in out
     assert f"config: {wd.resolve() / 'config.toml'}" in out
+
+
+def stamp(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def add_label(env, name="ai-review", at=None):
+    """Label PR #1 now (or at ``at``), as GitHub records it; ages earlier reviews like request_review."""
+    if at is None:
+        for rec in env.state().recent("o/r"):
+            env.age(rec.head_sha, 5)
+        at = time.time()
+    env.reload_gh()
+    env.prs[0]["labels"] = [{"name": name}]
+    env.timeline.append({"event": "labeled", "label": {"name": name}, "created_at": stamp(at)})
+    env.write_gh()
+
+
+def test_request_label_mode(env):
+    env.write_config(repo='labels = ["ai-review"]\nlabel_mode = "request"')
+    assert env.run("watch", "--once").exit_code == 0
+    assert env.calls() == []  # not labelled
+
+    add_label(env, at=time.time() - 60)
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 1
+    env.reload_gh()
+    assert env.prs[0]["labels"] == []  # taken off after the review...
+    assert env.removed_labels == [{"pr": 1, "label": "ai-review", "token": "bot-token"}]  # ...as the poster
+
+    first = env.pr_sha
+    env.extend_head("print('fix')\n")
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 1  # a push alone doesn't ask for a review
+
+    add_label(env)  # asking again after new commits
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 2 and f"`git diff {first} HEAD`" in env.calls()[-1]["argv"][1]
+
+    add_label(env)  # and again on the same commit
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 3 and "being reviewed again in full" in env.calls()[-1]["argv"][1]
+
+
+def test_request_label_left_behind_does_not_loop(env):
+    env.write_config(repo='labels = ["ai-review"]\nlabel_mode = "request"')
+    add_label(env, at=time.time() - 60)
+    assert env.run("watch", "--once").exit_code == 0
+    env.reload_gh()
+    env.prs[0]["labels"] = [{"name": "ai-review"}]  # removal failed: label still there, no new labeled event
+    env.write_gh()
+    for _ in range(2):
+        assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 1
+
+
+def comment(env, body, cid, login="alice", association="OWNER", at=None, pr=1):
+    env.reload_gh()
+    env.issue_comments = getattr(env, "issue_comments", []) + [{
+        "id": cid, "body": body, "user": {"login": login}, "author_association": association,
+        "issue_url": f"https://api.github.com/repos/o/r/issues/{pr}",
+        "created_at": stamp(time.time() + 1 if at is None else at),
+    }]
+    env.write_gh()
+
+
+def test_comment_command(env):
+    env.write_config(repo='labels = ["never"]\ncommands = ["/review", "@rocket-critic review"]')
+    comment(env, "/review", 100, at=time.time() - 3600)  # before rocket-critic was watching
+    assert env.run("watch", "--once").exit_code == 0
+    assert env.calls() == []
+
+    comment(env, "Looks good to me.\n@Rocket-Critic Review please", 101)
+    comment(env, "/review", 102, association="NONE")  # no write access
+    comment(env, "/review", 103, login="rc-bot")  # the bot's own comment
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 1
+    env.reload_gh()
+    assert env.reactions == [{"comment_id": 101, "content": "eyes", "token": "bot-token"}]
+
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 1  # each comment is used once
+
+    comment(env, "/review", 104)  # same commit, asked again
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 2 and "being reviewed again in full" in env.calls()[-1]["argv"][1]
+
+
+def test_comment_command_on_draft_and_over_limit(env):
+    env.write_config(review="max_reviews_per_pr = 1", repo='labels = ["never"]\ncommands = ["/review"]')
+    env.prs[1]["head"]["sha"] = env.push_pr(2, "draft-branch", content="print('draft')\n")
+    env.write_gh()
+    assert env.run("watch", "--once").exit_code == 0  # start watching comments
+    comment(env, "/review", 200, pr=2)  # PR #2 is a draft: an explicit request still counts
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 1 and env.calls()[0]["argv"][1].startswith("/code-review 2 ")
+
+    comment(env, "/review", 201, pr=2)  # over max_reviews_per_pr
+    assert env.run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 1
+    env.reload_gh()
+    assert [r["content"] for r in env.reactions] == ["eyes", "confused"]
+
+
+def test_label_and_reaction_as_github_app(env, app_api, monkeypatch):
+    monkeypatch.delenv("RC_TOK")
+    env.config.write_text(env.config.read_text().replace(
+        "poll_interval = 60",
+        f'poll_interval = 60\n[github_app]\napp_id = 123456\nprivate_key = "{app_api.key}"\napi_url = "{app_api.url}"'
+    ).replace('name = "o/r"', 'name = "o/r"\nlabels = ["ai-review"]\nlabel_mode = "request"\ncommands = ["/review"]'))
+    assert env.run("watch", "--once").exit_code == 0  # start watching comments
+    add_label(env, at=time.time() - 60)
+    assert env.run("watch", "--once").exit_code == 0
+    env.reload_gh()
+    assert env.removed_labels[0]["token"].startswith("ghs_test")  # removed as rocket-critic[bot]
+    comment(env, "/review", 300)
+    assert env.run("watch", "--once").exit_code == 0
+    env.reload_gh()
+    assert env.reactions[0]["content"] == "eyes" and env.reactions[0]["token"].startswith("ghs_test")
+
+
+def test_add_repo_request_mode_and_commands(env):
+    res = env.run("add-repo", "o/two", "--label", "ai-review", "--label-mode", "request", "--command", "/review")
+    assert res.exit_code == 0, res.output
+    two = load(env.config).repo("o/two")
+    assert (two.labels, two.label_mode, two.commands) == (["ai-review"], "request", ["/review"])
 
 
 def test_clean_and_init(env, tmp_path):

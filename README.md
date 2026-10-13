@@ -56,7 +56,7 @@ By default, reviews post as your own GitHub account. To post as a bot such as `r
 | Command | What it does |
 | --- | --- |
 | `init [--repo o/r ...] [--force]` | Write a sample config and create the working directory with its `repos/`, `prs/` and `runs/` directories. `--repo` fills in `[[repos]]` and creates that repo's directories. With `-w DIR` the config is written to `DIR/config.toml`. |
-| `add-repo o/r [--reviewer NAME ...] [--label L ...] [--base BRANCH ...] [--ignore-author LOGIN ...] [--drafts] [--no-check]` | Add a repo to the config file found by the usual search. Comments and layout are kept; the sample's `owner/repo` placeholder is replaced, otherwise the entry is appended. Checks with `gh` that the repo is reachable (skip with `--no-check`), refuses duplicates, and creates the repo's directories. Edit the file afterwards for per-repo `[claude]`/`[review]` overrides. |
+| `add-repo o/r [--reviewer NAME ...] [--label L ...] [--label-mode sticky\|request] [--command TEXT ...] [--base BRANCH ...] [--ignore-author LOGIN ...] [--drafts] [--no-check]` | Add a repo to the config file found by the usual search. Comments and layout are kept; the sample's `owner/repo` placeholder is replaced, otherwise the entry is appended. Checks with `gh` that the repo is reachable (skip with `--no-check`), refuses duplicates, and creates the repo's directories. Edit the file afterwards for per-repo `[claude]`/`[review]` overrides. |
 | `doctor` | Check `gh` auth, repo access, the `claude` binary, a test prompt against each configured model, and the GitHub login `/code-review` will post as. |
 | `watch [--once] [--repo o/r ...]` | Poll the configured repos every `poll_interval` seconds and review PRs that need it. One instance per workdir; Ctrl-C stops after the current review, and a second Ctrl-C aborts it. |
 | `review o/r#N [--level L] [--model M] [--comment/--no-comment] [--force] [--full]` | Review one PR now. Also accepts a PR URL. `--force` ignores filters, history and the per-PR review limit. `--full` reviews the whole PR without earlier-review context. `--no-comment` prints the findings without posting them. |
@@ -117,7 +117,8 @@ table. Keys in `[repos.claude.env]` are merged one by one over `[claude.env]`.
 - It is open, it is not a draft (unless `skip_drafts = false`), and its author is not in `ignore_authors`.
 - If you set `base_branches`, it targets one of them.
 - If you set `labels` or `reviewers`, it has one of those labels or requests review from one of those
-  users or teams. The two differ after the first review (see below).
+  users or teams. Comment `commands` also ask for reviews. The triggers differ after the first review
+  (see below).
 - Its added plus deleted lines are at most `max_diff_lines`. A PR over the limit is recorded as `skipped`
   for that commit, so later polls don't fetch it again until the next push.
 - Its head commit has not been reviewed yet. A push triggers a new review unless `rereview_on_push = false`.
@@ -126,17 +127,47 @@ table. Keys in `[repos.claude.env]` are merged one by one over `[claude.env]`.
 - If `settle_seconds` is set, the head has been unchanged for that long. A burst of pushes then gets one
   review of the last commit.
 
-#### Label vs. reviewer triggers
+#### Ways to ask for a review
 
-A label stays on the PR, so with `labels` every push is reviewed again (up to `max_reviews_per_pr`).
+Each repo can use any mix of these triggers:
 
-A review request works like asking a person. GitHub drops the request once that reviewer posts a review, so
+| Trigger | Config | Reviews when | Further pushes |
+| --- | --- | --- | --- |
+| Sticky label | `labels = ["ai-review"]` | the PR has the label | reviewed while the label stays on |
+| Request label | `labels = [...]`, `label_mode = "request"` | the label is added | not reviewed until the label is added again |
+| Review request | `reviewers = ["name"]` | review is requested from that user/team | not reviewed until review is re-requested |
+| Comment command | `commands = ["/review"]` | someone with write access comments the command | not reviewed until asked again |
+
+Every trigger stops at `max_reviews_per_pr`. Adding the same request again with no new commits gives a
+full review of that commit; after new commits, the re-review is incremental. Either way the earlier review
+threads are passed along.
+
+**Sticky label.** A label stays on the PR, so with `labels` every push is reviewed again (up to
+`max_reviews_per_pr`). Remove the label to stop.
+
+**Request label.** With `label_mode = "request"`, adding a label asks for one review. Once the review has
+posted, rocket-critic removes the label, as the posting identity (e.g. `rocket-critic[bot]`). Add it again
+to ask for another review. This is the closest thing to requesting a review from a GitHub App, which GitHub
+doesn't allow.
+
+**Review request.** A review request works like asking a person. GitHub drops the request once that reviewer posts a review, so
 later pushes are **not** reviewed until someone clicks *Re-request review*. A re-request triggers a review
 even without new commits: an incremental one after new commits, otherwise a full one of the same commit.
 Either way the earlier review threads are passed along. To tell a re-request from a request that is still
 open because a review posted nothing, rocket-critic checks the PR timeline (one API call, only for such
-PRs) and acts only on a request made after its last review started. Repeat reviews count toward
+PRs) and acts only on a request made after its last review started. The same check applies to request
+labels, so a label that couldn't be removed doesn't cause repeated reviews. Repeat reviews count toward
 `max_reviews_per_pr`.
+
+**Comment command.** With `commands = ["/review", "@rocket-critic review"]`, a PR comment with a line that
+is, or starts with, one of the commands (case-insensitive) asks for a review. rocket-critic reacts 👀 when
+it takes the request, or 😕 when the size limit or `max_reviews_per_pr` refuses it.
+- **Who can use it:** only the repo owner, organization members and collaborators (people with write
+  access). Comments posted before rocket-critic started watching the repo are ignored, and each comment
+  is used once.
+- **What it overrides:** an explicit command also overrides the label/reviewer triggers, drafts,
+  `ignore_authors` and `base_branches`.
+- **Cost:** checking costs one API call per repo per poll.
 
 `status` shows each commit's outcome: `pending` (settling), `running`, `done`, `failed` (will be retried),
 `skipped` (too large) or `attention` (see below). `review --force` overrides all of them.
@@ -352,8 +383,9 @@ A relative `private_key` path is relative to the config file's directory. Then r
   `GH_TOKEN`. It never prints or copies the key.
 - Tokens last an hour, so keep `claude.timeout` under about 55 minutes (the default is 45).
 - GitHub doesn't let you request a review from an app, so a `reviewers` trigger can't name
-  `rocket-critic[bot]`. Use a `labels` trigger (e.g. `add-repo OWNER/REPO --label ai-review`), or a person
-  or team in `reviewers` whose review requests should mean "run rocket-critic".
+  `rocket-critic[bot]`. Use a request label or a comment command instead:
+  `add-repo OWNER/REPO --label ai-review --label-mode request --command /review`. Label removal and the
+  👀 reaction then appear as `rocket-critic[bot]`.
 - If the sample config's `GH_TOKEN = "${ROCKET_CRITIC_GH_TOKEN}"` is still present with the variable unset,
   it is simply skipped and the app is used; no warning is shown.
 

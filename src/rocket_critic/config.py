@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 LEVELS = ("low", "medium", "high", "xhigh", "max")
+LABEL_MODES = ("sticky", "request")
 
 CONFIG_NAME = "config.toml"
 DEFAULT_WORKDIR = "~/.local/share/rocket-critic"
@@ -123,6 +124,11 @@ class RepoConfig:
     reviewers: list[str] = field(default_factory=list)
     ignore_authors: list[str] = field(default_factory=list)
     base_branches: list[str] = field(default_factory=list)
+    # "sticky": every push while labelled is reviewed; "request": a label asks for one review
+    # and is removed afterwards, so adding it again asks for another.
+    label_mode: str = "sticky"
+    # PR comment lines (e.g. "/review") that request a review, from people with write access.
+    commands: list[str] = field(default_factory=list)
 
     @property
     def owner(self) -> str:
@@ -297,7 +303,13 @@ def _repo(raw: dict[str, Any], claude_raw: dict[str, Any], review_raw: dict[str,
         reviewers=_strs(raw.pop("reviewers", []), f"{where}.reviewers"),
         ignore_authors=_strs(raw.pop("ignore_authors", []), f"{where}.ignore_authors"),
         base_branches=_strs(raw.pop("base_branches", []), f"{where}.base_branches"),
+        label_mode=_str(raw.pop("label_mode", "sticky"), f"{where}.label_mode"),
+        commands=_strs(raw.pop("commands", []), f"{where}.commands"),
     )
+    if repo.label_mode not in LABEL_MODES:
+        raise ConfigError(f"{where}.label_mode must be one of {', '.join(LABEL_MODES)}")
+    if any(not c.strip() for c in repo.commands):
+        raise ConfigError(f"{where}.commands must not contain empty strings")
     if raw:
         raise ConfigError(f"{where}: unknown keys: {', '.join(sorted(raw))}")
     return repo
@@ -406,19 +418,28 @@ def repo_block(
     reviewers: list[str] | None = None,
     ignore_authors: list[str] | None = None,
     base_branches: list[str] | None = None,
+    label_mode: str | None = None,
+    commands: list[str] | None = None,
 ) -> str:
     """A commented ``[[repos]]`` entry like the sample config's, with the given settings."""
     _check_repo_name(name)
     text = _template()
     start, end = _block_span(text, PLACEHOLDER_REPO)
     block = text[start:end].replace(f'name = "{PLACEHOLDER_REPO}"', f"name = {_toml_str(name)}")
+    if label_mode is not None and label_mode not in LABEL_MODES:
+        raise ConfigError(f"label_mode must be one of {', '.join(LABEL_MODES)}")
     values = {"skip_drafts": skip_drafts, "labels": labels, "reviewers": reviewers,
-              "ignore_authors": ignore_authors, "base_branches": base_branches}
+              "ignore_authors": ignore_authors, "base_branches": base_branches,
+              "label_mode": label_mode, "commands": commands}
     for key, value in values.items():
         if value is None:
             continue
-        rendered = ("true" if value else "false") if isinstance(value, bool) else (
-            "[" + ", ".join(_toml_str(v) for v in value) + "]")
+        if isinstance(value, bool):
+            rendered = "true" if value else "false"
+        elif isinstance(value, str):
+            rendered = _toml_str(value)
+        else:
+            rendered = "[" + ", ".join(_toml_str(v) for v in value) + "]"
         line = re.search(rf"^{key} = [^#\n]*?(\s*#.*)?$", block, re.M)
         comment = line.group(1) or ""
         # Keep the trailing comment aligned when the value fits in the old column.

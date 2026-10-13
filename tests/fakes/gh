@@ -51,6 +51,28 @@ if args[:2] == ["api", "user"]:
         sys.exit(1)
     print(login)
     sys.exit(0)
+def save():
+    json.dump(data, open(os.environ["FAKE_GH_DATA"], "w"))
+
+
+if args[0] == "api" and route.endswith("/reactions"):
+    comment_id = int(route.split("/")[-2])
+    content = next(a.split("=", 1)[1] for a in args if a.startswith("content="))
+    data.setdefault("reactions", []).append({"comment_id": comment_id, "content": content,
+                                             "token": os.environ.get("GH_TOKEN", "")})
+    save()
+    out({})
+if args[0] == "api" and "DELETE" in args and "/labels/" in route:
+    from urllib.parse import unquote
+    num, label = int(route.split("/")[-3]), unquote(route.split("/")[-1])
+    for pr in data.get("prs", []):
+        if pr["number"] == num:
+            pr["labels"] = [lbl for lbl in pr.get("labels", []) if lbl["name"] != label]
+    data.setdefault("removed_labels", []).append({"pr": num, "label": label, "token": os.environ.get("GH_TOKEN", "")})
+    save()
+    out({})
+if args[0] == "api" and route.endswith("/issues/comments"):  # repo-wide feed
+    pages(data.get("issue_comments", []))
 if args[0] == "api" and route.endswith("/reviews"):
     pages(data.get("reviews", []))
 if args[0] == "api" and route.endswith("/comments") and "/pulls/" in route:

@@ -134,11 +134,16 @@ def init(ctx: Ctx, repos: tuple[str, ...], force: bool) -> None:
 @click.option("--ignore-author", "ignore_authors", multiple=True,
               help="Skip PRs by this author (repeatable; replaces the default bot list).")
 @click.option("--drafts/--no-drafts", default=None, help="Also review draft PRs (default: skip them).")
+@click.option("--label-mode", type=click.Choice(["sticky", "request"]),
+              help="sticky: review every push while labelled (default); request: a label asks for one "
+                   "review and is removed afterwards.")
+@click.option("--command", "commands", multiple=True,
+              help="PR comment line that requests a review, e.g. /review (repeatable).")
 @click.option("--no-check", is_flag=True, help="Don't check that the repo is reachable with gh.")
 @pass_ctx
 def add_repo_cmd(ctx: Ctx, name: str, labels: tuple[str, ...], reviewers: tuple[str, ...],
                  base_branches: tuple[str, ...], ignore_authors: tuple[str, ...], drafts: bool | None,
-                 no_check: bool) -> None:
+                 label_mode: str | None, commands: tuple[str, ...], no_check: bool) -> None:
     """Add a repo to watch to the config file.
 
     The entry is appended (or replaces the sample's owner/repo placeholder),
@@ -154,6 +159,8 @@ def add_repo_cmd(ctx: Ctx, name: str, labels: tuple[str, ...], reviewers: tuple[
             reviewers=list(reviewers) or None,
             ignore_authors=list(ignore_authors) or None,
             base_branches=list(base_branches) or None,
+            label_mode=label_mode,
+            commands=list(commands) or None,
         )
     except ConfigError as exc:
         raise click.BadParameter(str(exc), param_hint="OWNER/REPO") from None

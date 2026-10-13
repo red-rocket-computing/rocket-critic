@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from urllib.parse import quote
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any
@@ -148,23 +149,42 @@ class GitHub:
                 thread.replies.append(((c.get("user") or {}).get("login") or "", c.get("body") or ""))
         return list(threads.values())
 
-    def review_requested_at(self, repo: str, number: int, names: list[str]) -> int | None:
-        """When review was last requested from any of ``names`` (users or teams), from the PR timeline.
+    def requested_at(self, repo: str, number: int, reviewers: list[str] = (), labels: list[str] = ()) -> int | None:
+        """When a review was last asked for, from the PR timeline: a review request to any of
+        ``reviewers`` (users or teams) or any of ``labels`` being added.
 
         Team names match on their slug or display name, with or without an ``org/`` prefix.
         """
-        wanted = {name.lower().rsplit("/", 1)[-1] for name in names}
+        wanted = {name.lower().rsplit("/", 1)[-1] for name in reviewers}
+        wanted_labels = {name.lower() for name in labels}
         latest = None
         for event in self._paginate(f"repos/{repo}/issues/{number}/timeline?per_page=100"):
-            if event.get("event") != "review_requested":
+            kind = event.get("event")
+            if kind == "review_requested":
+                who = event.get("requested_reviewer") or {}
+                team = event.get("requested_team") or {}
+                keys = {k.lower() for k in (who.get("login"), team.get("slug"), team.get("name")) if k}
+                hit = bool(keys & wanted)
+            elif kind == "labeled":
+                hit = ((event.get("label") or {}).get("name") or "").lower() in wanted_labels
+            else:
                 continue
-            who = event.get("requested_reviewer") or {}
-            team = event.get("requested_team") or {}
-            keys = {k.lower() for k in (who.get("login"), team.get("slug"), team.get("name")) if k}
-            if keys & wanted:
+            if hit:
                 stamp = _ts(event.get("created_at"))
                 latest = stamp if latest is None else max(latest, stamp)
         return latest
+
+    def issue_comments_since(self, repo: str, since: float) -> list[dict[str, Any]]:
+        """Issue and PR conversation comments in ``repo`` updated at or after ``since``."""
+        stamp = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return self._paginate(f"repos/{repo}/issues/comments?since={stamp}&sort=created&direction=asc&per_page=100")
+
+    def react(self, repo: str, comment_id: int, content: str) -> None:
+        """Add a reaction (e.g. "eyes", "confused") to an issue/PR comment."""
+        self._run("api", "-X", "POST", f"repos/{repo}/issues/comments/{comment_id}/reactions", "-f", f"content={content}")
+
+    def remove_label(self, repo: str, number: int, label: str) -> None:
+        self._run("api", "-X", "DELETE", f"repos/{repo}/issues/{number}/labels/{quote(label, safe='')}")
 
     def whoami(self, env: Mapping[str, str] | None = None) -> str | None:
         """Login of the authenticated identity, or None (e.g. an app token without /user access)."""

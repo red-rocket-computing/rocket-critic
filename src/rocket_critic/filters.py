@@ -15,6 +15,7 @@ TOO_LARGE = "too large"
 ALREADY = "already reviewed"
 EARLIER_COMMIT = "already reviewed an earlier commit"
 REREQUESTED = "review re-requested"
+COMMANDED = "requested in a comment"
 
 
 def matches(pr: PullRequest, repo: RepoConfig) -> tuple[bool, str]:
@@ -84,18 +85,44 @@ def requested_reviewers(pr: PullRequest, repo: RepoConfig) -> list[str]:
     return [r for r in repo.reviewers if _team_key(r) in requested]
 
 
+def request_labels(pr: PullRequest, repo: RepoConfig) -> list[str]:
+    """The configured labels on the PR, when labels are one-time requests (``label_mode = "request"``)."""
+    if repo.label_mode != "request":
+        return []
+    present = {lbl.lower() for lbl in pr.labels}
+    return [lbl for lbl in repo.labels if lbl.lower() in present]
+
+
 def rerequest_candidate(pr: PullRequest, repo: RepoConfig, state: State, why: str) -> Record | None:
     """The last finished review, if ``pr`` was skipped only because it was already reviewed
-    and a configured reviewer is requested again (possibly a re-request; the caller checks when).
+    and a review is being asked for again: a configured reviewer is requested, or (in
+    request label mode) a configured label is on the PR. The caller checks the timeline to
+    tell a new request from a stale one.
 
     Covers the same commit being re-requested and, with ``rereview_on_push = false``, a
     re-request after new commits. The per-PR review limit still applies.
     """
-    if not (why.startswith(ALREADY) or why == EARLIER_COMMIT) or not requested_reviewers(pr, repo):
+    asked = requested_reviewers(pr, repo) or request_labels(pr, repo)
+    if not (why.startswith(ALREADY) or why == EARLIER_COMMIT) or not asked:
         return None
     if not matches(pr, repo)[0] or _capped(pr, repo, state):
         return None
     return state.last_done(pr.repo, pr.number)
+
+
+def command_check(pr: PullRequest, repo: RepoConfig, state: State) -> tuple[bool, str]:
+    """Whether a review asked for in a PR comment may run.
+
+    An explicit request overrides the label/reviewer triggers, drafts, ignored authors and
+    base branches; the size limit and the per-PR review limit still apply.
+    """
+    size = pr.size
+    if repo.review.max_diff_lines and size is not None and size > repo.review.max_diff_lines:
+        return False, f"{TOO_LARGE} ({size} changed lines > {repo.review.max_diff_lines})"
+    rec = state.get(pr.repo, pr.number, pr.head_sha)
+    if rec is not None and rec.status == RUNNING:
+        return False, "review in progress"
+    return _capped(pr, repo, state) or (True, COMMANDED)
 
 
 def should_review(pr: PullRequest, repo: RepoConfig, state: State, retry_base: float) -> tuple[bool, str]:

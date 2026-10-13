@@ -25,6 +25,16 @@ CREATE TABLE IF NOT EXISTS reviews (
     done_count  INTEGER NOT NULL DEFAULT 0,  -- successful reviews of this commit (re-requests add more)
     PRIMARY KEY (repo, pr, head_sha)
 );
+CREATE TABLE IF NOT EXISTS comment_watch (
+    repo        TEXT PRIMARY KEY,
+    started_at  REAL NOT NULL,          -- commands posted before this are ignored
+    last_poll   REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS handled_comments (
+    repo        TEXT NOT NULL,
+    comment_id  INTEGER NOT NULL,
+    PRIMARY KEY (repo, comment_id)
+);
 """
 
 # Columns added after the first release, with their SQL types.
@@ -179,6 +189,32 @@ class State:
         else:
             rows = self.db.execute("SELECT * FROM reviews ORDER BY updated_at DESC LIMIT ?", (limit,))
         return [Record(**row) for row in rows]
+
+    def comment_watch(self, repo: str) -> tuple[float, float]:
+        """``(started_at, last_poll)`` for comment commands in ``repo``, starting the watch now if new."""
+        now = time.time()
+        with self.db:
+            self.db.execute(
+                "INSERT INTO comment_watch (repo, started_at, last_poll) VALUES (?, ?, ?) ON CONFLICT (repo) DO NOTHING",
+                (repo, now, now),
+            )
+        row = self.db.execute("SELECT started_at, last_poll FROM comment_watch WHERE repo = ?", (repo,)).fetchone()
+        return row["started_at"], row["last_poll"]
+
+    def set_comment_poll(self, repo: str, when: float) -> None:
+        with self.db:
+            self.db.execute("UPDATE comment_watch SET last_poll = ? WHERE repo = ?", (when, repo))
+
+    def comment_handled(self, repo: str, comment_id: int) -> bool:
+        row = self.db.execute(
+            "SELECT 1 FROM handled_comments WHERE repo = ? AND comment_id = ?", (repo, comment_id)
+        ).fetchone()
+        return row is not None
+
+    def mark_comment_handled(self, repo: str, comment_id: int) -> None:
+        with self.db:
+            self.db.execute("INSERT OR IGNORE INTO handled_comments (repo, comment_id) VALUES (?, ?)",
+                            (repo, comment_id))
 
     def reset_running(self) -> int:
         """Mark runs left 'running' by a crashed process as failed.
