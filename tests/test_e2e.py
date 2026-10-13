@@ -1,6 +1,7 @@
 """End-to-end runs of the CLI against a local git "remote", a fake gh and a fake claude."""
 
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -756,6 +757,94 @@ def test_watch_interval_from_env_and_config(env, caplog, monkeypatch):
 def test_watch_interval_rejects_bad_values(env, value):
     res = CliRunner().invoke(cli, ["-c", str(env.config), "watch", "--once", "-i", value])
     assert res.exit_code == 2 and "Invalid value for '-i' / '--interval'" in res.output
+
+
+def wait_for(predicate, timeout=30.0, what="condition"):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return
+        time.sleep(0.2)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+@pytest.fixture
+def daemon_env(env):
+    yield env
+    from rocket_critic.daemon import stop
+    stop(env.workdir, now=True, timeout=30)  # never leave a watcher behind
+
+
+def test_daemon_start_reload_stop(daemon_env):
+    env = daemon_env
+    from rocket_critic.poller import running_pid
+
+    res = env.run("start", "--interval", "10s")
+    assert res.exit_code == 0 and "started rocket-critic (pid" in res.output, res.output
+    pid = running_pid(env.workdir)
+    assert pid and pid != os.getpid()
+    assert env.run("start").exit_code != 0  # only one per workdir
+    wait_for(lambda: len(env.calls()) == 1, what="first review")
+    assert f"watcher: running (pid {pid})" in env.run("status").output
+
+    env.write_config(review='level = "high"')  # config update...
+    env.extend_head("print('more')\n")
+    res = env.run("reload")  # ...picked up immediately, followed by a poll
+    assert res.exit_code == 0 and f"pid {pid}" in res.output
+    wait_for(lambda: len(env.calls()) == 2, what="review after reload")
+    assert env.calls()[-1]["argv"][1].startswith("/code-review 1 high")
+
+    res = env.run("stop")
+    assert res.exit_code == 0 and "stopped" in res.output
+    assert running_pid(env.workdir) is None
+    assert "watcher: not running" in env.run("status").output
+    log = (env.workdir / "rocket-critic.log").read_text()
+    assert "received SIGHUP" in log and "config reloaded" in log and "received SIGTERM" in log
+    assert env.run("stop").output.startswith("not running")
+    assert env.run("reload").exit_code != 0
+
+
+def test_daemon_start_rejects_bad_config(daemon_env):
+    env = daemon_env
+    env.config.write_text(env.config.read_text().replace('name = "o/r"', 'name = "o/r"\n[repos.claude]\nbinary = 7'))
+    res = env.run("start")
+    assert res.exit_code != 0 and "binary must be a string" in res.output
+
+
+def test_daemon_start_failure_shows_log(tmp_path):
+    from rocket_critic import daemon
+
+    with pytest.raises(RuntimeError, match="the watcher exited") as exc:
+        daemon.start(["--no-such-option"], tmp_path)
+    assert "No such option" in str(exc.value)  # the end of the log is included
+
+
+def test_watch_reloads_config_between_polls(env, monkeypatch):
+    from rocket_critic.config import load as load_config
+    from rocket_critic.daemon import ConfigWatcher
+    from rocket_critic.poller import Critic
+
+    s = load_config(env.config)
+    watcher = ConfigWatcher(s)
+    critic = Critic(s)
+    polls = []
+
+    def reload(forced):  # runs before each poll
+        if len(polls) == 1:  # i.e. after the first poll: edit the config and push
+            env.write_config(review='level = "low"')
+            os.utime(env.config, ns=(env.config.stat().st_mtime_ns + 10**9,) * 2)
+            env.extend_head("print('x')\n")
+        new = watcher.check(forced)
+        polls.append(new)
+        if len(polls) == 3:  # after the second poll
+            critic.stop.set()
+        return new
+
+    monkeypatch.setattr(critic.wake, "wait", lambda timeout=None: True)  # no sleeping between polls
+    critic.watch(watcher.repos(s), reload=reload)
+    assert polls[0] is None and polls[1] is not None and polls[2] is None
+    assert [c["argv"][1].split("\n")[0] for c in env.calls()] == ["/code-review 1 medium --comment",
+                                                                   "/code-review 1 low --comment"]
 
 
 def test_clean_and_init(env, tmp_path):

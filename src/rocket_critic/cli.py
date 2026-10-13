@@ -13,7 +13,7 @@ from pathlib import Path
 
 import click
 
-from . import __version__, filters, proc
+from . import __version__, daemon, filters, proc
 from .config import (
     CONFIG_NAME,
     DEFAULT_CONFIG_PATH,
@@ -32,7 +32,8 @@ from .config import (
 )
 from .ghapp import GitHubApp, GitHubAppError
 from .github import GitHub
-from .poller import AlreadyRunning, Critic, lock
+from .daemon import ConfigWatcher
+from .poller import AlreadyRunning, Critic, lock, running_pid
 from .runner import build_command, build_env, parse_envelope
 from .state import DONE, State
 from .workspace import Workspace
@@ -52,9 +53,10 @@ def parse_pr_ref(ref: str) -> tuple[str, int]:
 
 
 class Ctx:
-    def __init__(self, config_path: Path | None, workdir: Path | None = None):
+    def __init__(self, config_path: Path | None, workdir: Path | None = None, verbose: bool = False):
         self.config_path = config_path
         self.workdir = workdir
+        self.verbose = verbose
         self._settings: Settings | None = None
 
     @property
@@ -87,7 +89,7 @@ def cli(ctx: click.Context, config_path: Path | None, workdir: Path | None, verb
         format="%(asctime)s %(levelname)-7s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    ctx.obj = Ctx(config_path, workdir)
+    ctx.obj = Ctx(config_path, workdir, verbose)
 
 
 @cli.command()
@@ -357,9 +359,9 @@ class Duration(click.ParamType):
 def watch(ctx: Ctx, once: bool, only: tuple[str, ...], interval: int | None) -> None:
     """Poll repos and review new or updated pull requests."""
     s = ctx.settings
-    if interval is not None:
-        s.poll_interval = interval  # also the base of the retry backoff
-    repos = [s.repo(name) for name in only] if only else s.repos
+    config = ConfigWatcher(s, workdir_override=ctx.workdir, interval=interval, only=only)
+    config.apply_overrides(s)  # --interval is also the base of the retry backoff
+    repos = config.repos(s)
     if not repos:
         raise click.ClickException("no repos configured")
     try:
@@ -367,10 +369,77 @@ def watch(ctx: Ctx, once: bool, only: tuple[str, ...], interval: int | None) -> 
             warn_unresolved_env(s)
             critic = Critic(s)
             critic.install_signal_handlers()
-            log.info("watching %s every %s", ", ".join(r.name for r in repos), format_duration(s.poll_interval))
-            critic.watch(repos, once=once)
+            log.info("watching %s every %s (pid %d; config %s is reloaded when it changes)",
+                     ", ".join(r.name for r in repos), format_duration(s.poll_interval), os.getpid(),
+                     config.path)
+            critic.watch(repos, once=once, reload=config.check)
     except AlreadyRunning as exc:
         raise click.ClickException(str(exc)) from None
+
+
+@cli.command()
+@click.option("--repo", "only", multiple=True, help="Only watch this owner/repo (repeatable).")
+@click.option("-i", "--interval", type=Duration(), envvar="ROCKET_CRITIC_POLL_INTERVAL",
+              help="Time between polls (see `watch --interval`).")
+@click.option("--wait", default=10.0, show_default=True, help="Seconds to wait for the watcher to start.")
+@pass_ctx
+def start(ctx: Ctx, only: tuple[str, ...], interval: int | None, wait: float) -> None:
+    """Run `watch` in the background (daemon mode).
+
+    Output goes to WORKDIR/rocket-critic.log. The config file is reloaded when it
+    changes; use `reload` to force it, and `stop` to end the watcher.
+    """
+    s = ctx.settings
+    pid = running_pid(s.workdir)
+    if pid:
+        raise click.ClickException(f"already running (pid {pid}) for {s.workdir}")
+    if not only and not s.repos:
+        raise click.ClickException("no repos configured")
+    argv = ["-c", str(Path(s.path).resolve())]
+    if ctx.workdir:
+        argv += ["-w", str(s.workdir)]
+    if ctx.verbose:
+        argv.append("-v")
+    argv.append("watch")
+    for name in only:
+        argv += ["--repo", name]
+    if interval is not None:
+        argv += ["--interval", str(interval)]
+    try:
+        pid = daemon.start(argv, s.workdir, wait=wait)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(f"started rocket-critic (pid {pid}); log: {s.workdir / daemon.LOG_NAME}")
+
+
+@cli.command()
+@click.option("--now", is_flag=True, help="Abort a review in progress instead of letting it finish.")
+@click.option("--timeout", type=float, help="Give up waiting after this many seconds.")
+@pass_ctx
+def stop(ctx: Ctx, now: bool, timeout: float | None) -> None:
+    """Stop the background watcher (after the current review, unless --now)."""
+    workdir = ctx.settings.workdir
+    pid = running_pid(workdir)
+    if not pid:
+        click.echo(f"not running for {workdir}")
+        return
+    click.echo(f"stopping rocket-critic (pid {pid})" + ("" if now else "; a review in progress finishes first"))
+    try:
+        daemon.stop(workdir, now=now, timeout=timeout)
+    except TimeoutError as exc:
+        raise click.ClickException(f"{exc}; run `stop --now` to abort it") from None
+    click.echo("stopped")
+
+
+@cli.command()
+@pass_ctx
+def reload(ctx: Ctx) -> None:
+    """Make the running watcher re-read the config now and poll."""
+    workdir = ctx.settings.workdir
+    pid = daemon.reload(workdir)
+    if not pid:
+        raise click.ClickException(f"not running for {workdir}")
+    click.echo(f"asked rocket-critic (pid {pid}) to reload {ctx.settings.path}; see {workdir / daemon.LOG_NAME}")
 
 
 @cli.command()
@@ -419,8 +488,15 @@ def review(ctx: Ctx, pr_ref: str, level: str | None, model: str | None, comment:
 @click.option("-n", "--limit", default=30, show_default=True)
 @pass_ctx
 def status(ctx: Ctx, repo: str | None, limit: int) -> None:
-    """Show recent reviews."""
-    state = State(ctx.settings.workdir / "state.db")
+    """Show whether the watcher runs, and recent reviews."""
+    workdir = ctx.settings.workdir
+    pid = running_pid(workdir)
+    if pid:
+        log_path = workdir / daemon.LOG_NAME
+        click.echo(f"watcher: running (pid {pid})" + (f"; log {log_path}" if log_path.exists() else ""))
+    else:
+        click.echo("watcher: not running")
+    state = State(workdir / "state.db")
     rows = state.recent(repo, limit)
     if not rows:
         click.echo("no reviews yet")

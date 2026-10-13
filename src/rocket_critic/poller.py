@@ -9,7 +9,7 @@ import os
 import signal
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,6 +64,15 @@ class Critic:
         self._identity: dict[str, str | None] = {}
         self.app = GitHubApp(settings.github_app) if settings.github_app else None
         self.stop = threading.Event()
+        self.wake = threading.Event()  # ends the sleep between polls early
+        self.reload_requested = threading.Event()
+
+    def apply_settings(self, settings: Settings) -> None:
+        """Switch to a reloaded config (same workdir, so state and checkouts carry over)."""
+        if settings.github_app != self.settings.github_app:
+            self.app = GitHubApp(settings.github_app) if settings.github_app else None
+        self.settings = settings
+        self._identity.clear()
 
     def uses_app(self, repo: RepoConfig) -> bool:
         """Whether /code-review posts as the GitHub App for ``repo`` (a token in [claude.env] wins)."""
@@ -347,38 +356,90 @@ class Critic:
                 log.error("%s: poll failed: %s", repo.name, exc)
         return outcomes
 
-    def watch(self, repos: list[RepoConfig], once: bool = False) -> None:
+    def watch(
+        self,
+        repos: list[RepoConfig],
+        once: bool = False,
+        reload: Callable[[bool], tuple[Settings, list[RepoConfig]] | None] | None = None,
+    ) -> None:
+        """Poll until stopped. Before each poll, ``reload(forced)`` may return a new config
+        (forced after SIGHUP); between polls, SIGHUP or a stop request ends the wait early."""
         reset = self.state.reset_running()
         if reset:
             log.info("marked %d interrupted review(s) for retry", reset)
         while not self.stop.is_set():
+            if reload is not None:
+                forced = self.reload_requested.is_set()
+                self.reload_requested.clear()
+                new = reload(forced)
+                if new is not None:
+                    settings, repos = new
+                    self.apply_settings(settings)
             self.poll_once(repos)
             if once:
                 break
-            self.stop.wait(self.settings.poll_interval)
+            self.wake.wait(self.settings.poll_interval)
+            self.wake.clear()
 
     def install_signal_handlers(self) -> None:
-        def handler(signum: int, _frame: object) -> None:
+        def stop(signum: int, _frame: object) -> None:
             if self.stop.is_set():
                 raise KeyboardInterrupt
             log.info("received %s; stopping after the current review (repeat to abort it)",
                      signal.Signals(signum).name)
             self.stop.set()
+            self.wake.set()
 
-        signal.signal(signal.SIGTERM, handler)
-        signal.signal(signal.SIGINT, handler)
+        def reload(_signum: int, _frame: object) -> None:
+            log.info("received SIGHUP; reloading the config before the next poll")
+            self.reload_requested.set()
+            self.wake.set()
+
+        signal.signal(signal.SIGTERM, stop)
+        signal.signal(signal.SIGINT, stop)
+        signal.signal(signal.SIGHUP, reload)
+
+
+LOCK_NAME = "rocket-critic.lock"
 
 
 @contextmanager
 def lock(workdir: Path) -> Iterator[None]:
+    """Hold the workdir lock; the lock file records the holder's PID (see :func:`running_pid`)."""
     workdir.mkdir(parents=True, exist_ok=True)
-    path = workdir / "rocket-critic.lock"
-    with open(path, "w") as fh:
+    path = workdir / LOCK_NAME
+    # Opened without truncating, so a failed attempt never wipes the holder's PID.
+    with open(path, "a+") as fh:
         try:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise AlreadyRunning(f"another rocket-critic is using {workdir}") from None
+            pid = running_pid(workdir)
+            holder = f" (pid {pid})" if pid else ""
+            raise AlreadyRunning(f"another rocket-critic is using {workdir}{holder}") from None
         try:
+            fh.seek(0)
+            fh.truncate()
+            fh.write(f"{os.getpid()}\n")
+            fh.flush()
             yield
         finally:
+            fh.seek(0)
+            fh.truncate()
             fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def running_pid(workdir: Path) -> int | None:
+    """PID of the process holding ``workdir``'s lock, or None if nobody holds it."""
+    path = workdir / LOCK_NAME
+    try:
+        fh = open(path)
+    except FileNotFoundError:
+        return None
+    with fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            text = fh.read().strip()
+            return int(text) if text.isdigit() else -1  # held, PID not written yet
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        return None

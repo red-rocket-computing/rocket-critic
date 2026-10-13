@@ -60,7 +60,10 @@ By default, reviews post as your own GitHub account. To post as a bot such as `r
 | `doctor` | Check `gh` auth, repo access, the `claude` binary, a test prompt against each configured model, and the GitHub login `/code-review` will post as. |
 | `watch [--once] [--repo o/r ...] [-i/--interval DURATION]` | Poll the configured repos and review PRs that need it. `--interval` sets the time between polls for this run, as seconds or with an `s`/`m`/`h` suffix (`90`, `30s`, `5m`, `1h`; at least 10s), overriding `poll_interval` (also via `$ROCKET_CRITIC_POLL_INTERVAL`). It is also the base of the retry backoff. One instance per workdir; Ctrl-C stops after the current review, and a second Ctrl-C aborts it. |
 | `review o/r#N [--level L] [--model M] [--comment/--no-comment] [--force] [--full]` | Review one PR now. Also accepts a PR URL. `--force` ignores filters, history and the per-PR review limit. `--full` reviews the whole PR without earlier-review context. `--no-comment` prints the findings without posting them. |
-| `status [--repo o/r] [-n N]` | Recent reviews from the state database. |
+| `start [--repo o/r ...] [-i/--interval DURATION]` | Run `watch` in the background ([daemon mode](#running-in-the-background)), logging to `WORKDIR/rocket-critic.log`. Reports success once the watcher is running, or shows the end of the log if it failed to start. |
+| `stop [--now] [--timeout SECONDS]` | Stop the background watcher. A review in progress finishes first unless `--now`. |
+| `reload` | Make the running watcher re-read the config now and poll straight away. |
+| `status [--repo o/r] [-n N]` | Whether the watcher is running (and its PID), then recent reviews from the state database. |
 | `clean` | Remove leftover PR worktrees. |
 
 Global options:
@@ -214,6 +217,76 @@ DIR is moved. `-w DIR` on the command line overrides it. Its layout:
 
 Fork PRs work because rocket-critic fetches `refs/pull/<N>/head`. Private repos use `gh` as the git
 credential helper.
+
+## Running in the background
+
+`rocket-critic start` runs `watch` as a background process (daemon mode). It takes the same `--repo` and
+`--interval` options:
+
+```sh
+cd ~/Workspace/rocket-critic/work
+../.venv/bin/rocket-critic -w . start --interval 2m
+../.venv/bin/rocket-critic -w . status        # watcher: running (pid 12345); log .../rocket-critic.log
+tail -f rocket-critic.log
+../.venv/bin/rocket-critic -w . stop          # waits for a review in progress; --now aborts it
+```
+
+There is one watcher per workdir. Its PID is kept in `WORKDIR/rocket-critic.lock` for as long as it runs,
+so `status`, `stop` and `reload` find it. A crash can't leave a stale PID behind.
+
+### Configuration updates
+
+A running watcher (from `start` or a plain `watch`) picks up config changes without restarting:
+
+- Before each poll it checks whether the config file changed, and if so reloads it: added or removed repos,
+  triggers, review settings, `[claude]`, `[github_app]`, `poll_interval`.
+- `rocket-critic reload` (or `kill -HUP <pid>`) reloads immediately and polls straight away, instead of
+  waiting for the next poll.
+- An invalid edit is logged (`config reload failed, keeping the current config: ...`) and the watcher keeps
+  running with the previous config; save a fixed file to retry. A config with no repos is refused the same
+  way.
+- Options given on the command line stay in force: `--interval` keeps overriding `poll_interval`, `--repo`
+  keeps limiting the repos, and `-w` keeps choosing the workdir.
+- A change to `workdir` needs a restart (`stop`, then `start`), because the running watcher holds that
+  directory's lock, history and checkouts.
+
+Each reload is logged with what changed, e.g. `config reloaded from .../config.toml (added sgstreet/other)`.
+
+### As a systemd service
+
+On a server, systemd can supervise the watcher instead of `start`/`stop`. Run `watch` in the foreground and
+let systemd handle restarts and logs:
+
+```ini
+# ~/.config/systemd/user/rocket-critic.service
+[Unit]
+Description=rocket-critic PR reviewer
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/Workspace/rocket-critic/work
+ExecStart=%h/Workspace/rocket-critic/.venv/bin/rocket-critic -w . watch
+ExecReload=/bin/kill -HUP $MAINPID
+# Let a review in progress finish on stop (claude.timeout is 45 minutes by default).
+KillSignal=SIGTERM
+TimeoutStopSec=50min
+Restart=on-failure
+# Environment=ROCKET_CRITIC_GH_TOKEN=...   (not needed with [github_app])
+
+[Install]
+WantedBy=default.target
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now rocket-critic
+systemctl --user reload rocket-critic       # re-read the config now
+journalctl --user -u rocket-critic -f
+loginctl enable-linger $USER                # keep it running after you log out
+```
+
+Make sure the service can find `git`, `gh`, `claude` and `openssl`, either through a `PATH=` line under
+`[Service]` or by using absolute paths in the config. Ollama, if used, must be running too.
 
 ## Using Ollama models
 
