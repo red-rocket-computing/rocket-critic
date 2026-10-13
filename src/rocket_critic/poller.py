@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import filters, proc
 from .config import RepoConfig, Settings
+from .ghapp import GitHubApp, GitHubAppError
 from .github import GitHub, PullRequest
 from .runner import ReviewError, build_env, rereview_context, run_review
 from .state import ATTENTION, DONE, FAILED, PHASE_REVIEW, SKIPPED, Record, State
@@ -42,7 +43,22 @@ class Critic:
         self.ws = workspace or Workspace(settings.workdir)
         self.state = state or State(settings.workdir / "state.db")
         self._identity: dict[str, str | None] = {}
+        self.app = GitHubApp(settings.github_app) if settings.github_app else None
         self.stop = threading.Event()
+
+    def uses_app(self, repo: RepoConfig) -> bool:
+        """Whether /code-review posts as the GitHub App for ``repo`` (a token in [claude.env] wins)."""
+        explicit = repo.claude.resolved_env()
+        return self.app is not None and "GH_TOKEN" not in explicit and "GITHUB_TOKEN" not in explicit
+
+    def app_env(self, repo: RepoConfig) -> dict[str, str]:
+        """GH_TOKEN for the claude subprocess: a fresh installation token limited to the repo."""
+        if not self.uses_app(repo):
+            return {}
+        try:
+            return {"GH_TOKEN": self.app.token(repo.name)}
+        except GitHubAppError as exc:
+            raise ReviewError(f"GitHub App token: {exc}") from None
 
     # -- one PR ---------------------------------------------------------------
 
@@ -62,9 +78,10 @@ class Critic:
         try:
             worktree = self.ws.checkout(pr.repo, pr.number, pr.head_sha, pr.base_ref)
             context = self.rereview_context(pr, repo, last.head_sha) if last else ""
+            extra_env = self.app_env(repo)
             self.state.set_phase(pr.repo, pr.number, pr.head_sha, PHASE_REVIEW)
             result = run_review(worktree, pr.repo, pr.number, repo.claude, repo.review, comment=comment,
-                                context=context)
+                                context=context, extra_env=extra_env)
         except (ReviewError, proc.CommandError) as exc:
             self.state.finish(pr.repo, pr.number, pr.head_sha, FAILED, error=str(exc))
             log.error("%s: review failed: %s", pr.ref, exc)
@@ -124,6 +141,12 @@ class Critic:
 
     def identity(self, repo: RepoConfig) -> str | None:
         """GitHub login the claude subprocess posts as (cached per distinct env)."""
+        if self.uses_app(repo):
+            try:
+                return self.app.login
+            except GitHubAppError as exc:
+                log.warning("could not look up the GitHub App: %s", exc)
+                return None
         env = build_env(repo.claude, repo.name)
         key = env.get("GH_TOKEN", "") + "\0" + env.get("GITHUB_TOKEN", "")
         if key not in self._identity:

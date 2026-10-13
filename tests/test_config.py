@@ -66,6 +66,9 @@ def test_env_expansion_drops_unset_refs():
     ({"poll_interval": 1}, "poll_interval"),
     ({"review": {"max_reviews_per_pr": -1}}, "max_reviews_per_pr"),
     ({"review": {"incremental": "yes"}}, "incremental"),
+    ({"github_app": {"private_key": "k.pem"}}, "app_id"),
+    ({"github_app": {"app_id": 1}}, "private_key"),
+    ({"github_app": {"app_id": 1, "private_key": "k", "extra": 1}}, "unknown keys"),
 ])
 def test_validation(data, msg):
     with pytest.raises(ConfigError, match=msg):
@@ -171,3 +174,14 @@ def test_add_repo_after_per_repo_subtables(tmp_path):
     assert p.read_text().startswith("# keep me\n")
     with pytest.raises(ConfigError, match="already in"):
         add_repo(p, repo_block("A/One"))
+
+
+def test_github_app_config(tmp_path):
+    from rocket_critic.config import load
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('[github_app]\napp_id = "123"\nprivate_key = "keys/app.pem"\n')
+    app = load(cfg).github_app
+    assert app.app_id == "123" and app.private_key == (tmp_path / "keys" / "app.pem").resolve()
+    assert app.installation_id is None and app.api_url == "https://api.github.com"
+    assert load(cfg).repos == [] and parse({}).github_app is None

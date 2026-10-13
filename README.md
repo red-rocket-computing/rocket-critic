@@ -249,6 +249,38 @@ Reviews post under the account that owns the token. A token you create on your o
 you; to post under another name, create the token on a separate GitHub account (a "machine user") that has
 access to the repos. `doctor` points this out when the token's account is the same as your `gh` login.
 
+#### Posting as a GitHub App
+
+A GitHub App gives the reviews their own name (`<app-slug>[bot]`) without a second user account, and its
+tokens are short-lived and limited to one repo.
+
+1. **Settings → Developer settings → GitHub Apps → New GitHub App** (or the organization's settings).
+   Name it (e.g. `rocket-critic`), give any homepage URL, and untick **Webhook → Active**.
+   Repository permissions: **Pull requests: Read and write**, **Contents: Read-only** (Metadata: Read-only
+   is added automatically). Create it.
+2. Note the **App ID**, then **Generate a private key** and save the `.pem` (e.g.
+   `~/.config/rocket-critic/rocket-critic.pem`, `chmod 600`).
+3. **Install App** on the account that owns the repos and select them.
+4. Add to the config:
+
+   ```toml
+   [github_app]
+   app_id = 123456
+   private_key = "~/.config/rocket-critic/rocket-critic.pem"
+   ```
+
+5. Run `rocket-critic doctor`. It checks the key, finds the installation for each repo, issues a test
+   token and shows `/code-review will post as: rocket-critic[bot]`.
+
+For each review, rocket-critic signs a JWT with the key (using the `openssl` command) and gets a new
+installation token, limited to that repo, which it passes to `/code-review` as `GH_TOKEN`. Tokens last an
+hour, so keep `claude.timeout` under about 55 minutes. A `GH_TOKEN` that resolves in `[claude.env]` takes
+precedence over the app. rocket-critic still uses your `gh` login to list PRs and clone. Set
+`installation_id` only to skip the per-repo lookup; `api_url` points at GitHub Enterprise Server.
+
+GitHub doesn't let you request a review from an app, so use a `labels` trigger (or a person or team in
+`reviewers`) to choose which PRs it reviews.
+
 If `/code-review` needs a tool that is not on the allowlist, the call is denied and logged as a warning
 that names the tool. Add the tool to `allowed_tools` if you trust it.
 

@@ -28,6 +28,7 @@ from .config import (
     repo_block,
     sample_config,
 )
+from .ghapp import GitHubApp, GitHubAppError
 from .github import GitHub
 from .poller import AlreadyRunning, Critic, lock
 from .runner import build_command, build_env, parse_envelope
@@ -181,11 +182,15 @@ _TOKEN_KINDS = {
 }
 
 
-def describe_token(claude: ClaudeConfig) -> tuple[bool, str]:
+def describe_token(claude: ClaudeConfig, app: GitHubApp | None = None) -> tuple[bool, str]:
     """Where the claude subprocess's GitHub token comes from, never showing the token itself.
 
-    Returns ``(False, why)`` when [claude.env] sets one that does not resolve.
+    Returns ``(False, why)`` when [claude.env] sets one that does not resolve and no
+    GitHub App takes its place.
     """
+    explicit = claude.resolved_env()
+    if app is not None and "GH_TOKEN" not in explicit and "GITHUB_TOKEN" not in explicit:
+        return True, f"GitHub App {app.cfg.app_id} (a new token, limited to the repo, for each review)"
     for key in ("GH_TOKEN", "GITHUB_TOKEN"):
         missing = claude.unresolved_env().get(key)
         if missing:
@@ -205,10 +210,15 @@ def describe_token(claude: ClaudeConfig) -> tuple[bool, str]:
 
 
 def warn_unresolved_env(settings: Settings) -> None:
-    """Log [claude.env] entries dropped because a ${VAR} they use is unset."""
+    """Log [claude.env] entries dropped because a ${VAR} they use is unset.
+
+    A missing token is expected when a GitHub App provides it.
+    """
     seen = set()
     for repo in settings.repos or [settings.repo("example/example")]:
         for key, names in repo.claude.unresolved_env().items():
+            if settings.github_app and key in ("GH_TOKEN", "GITHUB_TOKEN"):
+                continue
             if (key, tuple(names)) not in seen:
                 seen.add((key, tuple(names)))
                 log.warning("[claude.env] %s skipped: %s not set or empty", key,
@@ -244,6 +254,25 @@ def doctor(ctx: Ctx) -> None:
         except proc.CommandError as exc:
             report(False, f"list PRs in {repo.name}", str(exc))
 
+    app = GitHubApp(s.github_app) if s.github_app else None
+    app_login = None
+    if app:
+        report(shutil.which("openssl") is not None, "openssl on PATH (signs GitHub App tokens)",
+               shutil.which("openssl") or "not found")
+        try:
+            app_login = app.login
+            report(True, f"GitHub App {s.github_app.app_id}", f"{app_login}, key {s.github_app.private_key}")
+        except GitHubAppError as exc:
+            report(False, f"GitHub App {s.github_app.app_id}", str(exc))
+        if app_login:
+            for repo in s.repos:
+                try:
+                    installation = app.installation_id(repo.name)
+                    app.token(repo.name)
+                    report(True, f"GitHub App on {repo.name}", f"installation {installation}, token issued")
+                except GitHubAppError as exc:
+                    report(False, f"GitHub App on {repo.name}", str(exc))
+
     # One backend check per distinct claude configuration.
     seen: set[str] = set()
     for repo in s.repos or [s.repo("example/example")]:
@@ -272,8 +301,11 @@ def doctor(ctx: Ctx) -> None:
         except Exception as exc:  # noqa: BLE001 - doctor reports everything
             report(False, label, str(exc))
 
-        token_ok, token_detail = describe_token(c)
+        token_ok, token_detail = describe_token(c, app)
         report(token_ok, "GitHub token for /code-review", token_detail)
+        if token_detail.startswith("GitHub App"):
+            report(app_login is not None, "/code-review will post as", app_login or "unknown (GitHub App check failed)")
+            continue
         login = gh.whoami(env=env)
         detail = login or "unknown (gh api user failed)"
         if login and gh_login and login.lower() == gh_login.lower() and token_ok and not token_detail.startswith("none"):

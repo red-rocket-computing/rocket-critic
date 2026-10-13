@@ -36,6 +36,15 @@ CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
 # the watched repos with Pull requests: read/write and Contents: read.
 GH_TOKEN = "${ROCKET_CRITIC_GH_TOKEN}"
 
+# Post reviews as a GitHub App (shown as <app-slug>[bot]) instead of a user
+# token: rocket-critic signs in with the app's private key and gives
+# /code-review a new installation token, limited to the repo, for each review.
+# A GH_TOKEN that resolves in [claude.env] takes precedence over the app.
+# [github_app]
+# app_id = 123456
+# private_key = "~/.config/rocket-critic/rocket-critic.pem"   # relative paths: from this file's directory
+# installation_id = 12345678         # optional; looked up per repo by default
+
 [review]
 level = "medium"                     # low | medium | high | xhigh | max
 max_findings = ""                    # "" = /code-review default, a number, or "all"

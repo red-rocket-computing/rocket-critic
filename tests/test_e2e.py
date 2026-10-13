@@ -59,10 +59,11 @@ class Env:
         self.config = tmp / "config.toml"
         self.write_config()
 
-    def write_config(self, review="", repo=""):
+    def write_config(self, review="", repo="", top=""):
         self.config.write_text(f"""
 workdir = "{self.workdir}"
 poll_interval = 60
+{top}
 [claude]
 model = "glm-5.3:cloud"
 [claude.env]
@@ -518,6 +519,77 @@ def test_watch_warns_about_unset_env_ref(env, monkeypatch, caplog):
     assert env.run("watch", "--once").exit_code == 0
     assert "[claude.env] GH_TOKEN skipped: $RC_TOK not set or empty" in caplog.text
     assert "GH_TOKEN" not in env.calls()[0]["env"]
+
+
+@pytest.fixture
+def app_api(tmp_path, monkeypatch):
+    from fake_github_api import FakeGitHubAPI
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    api = FakeGitHubAPI(tmp_path)
+    yield api
+    api.close()
+
+
+def use_app(env, app_api, monkeypatch, **extra):
+    monkeypatch.delenv("RC_TOK")  # the sample-style GH_TOKEN = "${RC_TOK}" no longer resolves
+    lines = "\n".join(f"{k} = {json.dumps(v)}" for k, v in extra.items())
+    env.write_config(top=f'[github_app]\napp_id = 123456\nprivate_key = "{app_api.key}"\n'
+                         f'api_url = "{app_api.url}"\n{lines}\n')
+
+
+def test_github_app_token_per_review(env, app_api, monkeypatch, caplog):
+    use_app(env, app_api, monkeypatch)
+    assert env.run("watch", "--once").exit_code == 0
+    (call,) = env.calls()
+    assert call["env"]["GH_TOKEN"] == "ghs_test1"
+    assert app_api.tokens_issued == [{"path": "/app/installations/42/access_tokens",
+                                      "body": {"repositories": ["r"]}, "token": "ghs_test1"}]
+    assert "GH_TOKEN skipped" not in caplog.text  # expected when the app provides the token
+
+    env.extend_head("print('again')\n")
+    assert env.run("watch", "--once").exit_code == 0
+    assert env.calls()[-1]["env"]["GH_TOKEN"] == "ghs_test2"  # a fresh token every review
+
+
+def test_github_app_identity_used_for_dedupe_and_threads(env, app_api, monkeypatch):
+    use_app(env, app_api, monkeypatch)
+    env.reviews = [{"user": {"login": "rocket-critic[bot]"}, "commit_id": env.pr_sha}]
+    env.write_gh()
+    assert env.run("watch", "--once").exit_code == 0
+    assert env.calls() == []  # recognised as already reviewed by the app
+    assert app_api.tokens_issued == []
+
+
+def test_explicit_token_beats_github_app(env, app_api, monkeypatch):
+    use_app(env, app_api, monkeypatch)
+    monkeypatch.setenv("RC_TOK", "bot-token")
+    assert env.run("watch", "--once").exit_code == 0
+    assert env.calls()[0]["env"]["GH_TOKEN"] == "bot-token" and app_api.tokens_issued == []
+
+
+def test_github_app_not_installed_fails_safely(env, app_api, monkeypatch):
+    use_app(env, app_api, monkeypatch)
+    del app_api.installations["o/r"]
+    assert env.run("watch", "--once").exit_code == 0
+    assert env.calls() == []
+    rec = env.state().get("o/r", 1, env.pr_sha)
+    assert rec.status == FAILED and "not installed on o/r" in rec.error
+    assert rec.phase == "checkout"  # nothing was posted, so a retry is safe
+
+
+def test_doctor_with_github_app(env, app_api, monkeypatch):
+    use_app(env, app_api, monkeypatch)
+    out = env.run("doctor").output
+    assert "[ok  ]" in doctor_line(out, "GitHub App 123456") and "rocket-critic[bot]" in out
+    assert "installation 42, token issued" in doctor_line(out, "GitHub App on o/r")
+    assert "[ok  ]" in doctor_line(out, "GitHub token for /code-review")
+    assert doctor_line(out, "will post as").endswith("rocket-critic[bot]")
+
+    app_api.slug, app_api.app_id = "x", "999"  # wrong app id: the JWT is rejected
+    out = env.run("doctor").output
+    assert "[FAIL]" in doctor_line(out, "GitHub App 123456") and "HTTP 401" in out
 
 
 def test_clean_and_init(env, tmp_path):

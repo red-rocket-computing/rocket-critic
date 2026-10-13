@@ -117,9 +117,14 @@ def build_command(prompt: str, claude: ClaudeConfig) -> list[str]:
     return cmd
 
 
-def build_env(claude: ClaudeConfig, repo: str, base: Mapping[str, str] | None = None) -> dict[str, str]:
+def build_env(claude: ClaudeConfig, repo: str, base: Mapping[str, str] | None = None,
+              extra: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The claude subprocess environment: ``base`` (default os.environ), then ``extra``
+    (e.g. a GitHub App token), then ``[claude.env]``, which wins."""
     env = dict(os.environ if base is None else base)
-    env.update(claude.resolved_env(dict(env)))
+    refs = dict(env)
+    env.update(extra or {})
+    env.update(claude.resolved_env(refs))
     env["GH_REPO"] = repo
     return env
 
@@ -170,10 +175,11 @@ def run_review(
     *,
     comment: bool | None = None,
     context: str = "",
+    extra_env: Mapping[str, str] | None = None,
 ) -> ReviewResult:
     prompt = review_prompt(number, review, comment=comment, context=context)
     cmd = build_command(prompt, claude)
-    env = build_env(claude, repo)
+    env = build_env(claude, repo, extra=extra_env)
     log.info("%s#%d: running `%s`%s (model=%s)", repo, number, prompt.split("\n", 1)[0],
              " with re-review context" if context else "", claude.model or "default")
     try:

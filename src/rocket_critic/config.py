@@ -134,6 +134,16 @@ class RepoConfig:
 
 
 @dataclass
+class GitHubAppConfig:
+    """A GitHub App that /code-review posts as (``[github_app]``)."""
+
+    app_id: str
+    private_key: Path
+    installation_id: int | None = None  # default: looked up per repo
+    api_url: str = "https://api.github.com"
+
+
+@dataclass
 class Settings:
     workdir: Path
     poll_interval: int
@@ -141,6 +151,7 @@ class Settings:
     review: ReviewConfig
     repos: list[RepoConfig]
     path: Path | None = None
+    github_app: GitHubAppConfig | None = None
 
     def repo(self, name: str) -> RepoConfig:
         """The configured repo ``name``, or one built from the globals if unconfigured."""
@@ -203,6 +214,9 @@ def load(path: Path | None = None, workdir: Path | None = None) -> Settings:
         raise ConfigError(f"{path}: {exc}") from None
     settings = parse(data)
     settings.path = path
+    app = settings.github_app
+    if app and not app.private_key.is_absolute():
+        app.private_key = (path.parent / app.private_key).resolve()
     if workdir:
         settings.workdir = Path(workdir).expanduser().resolve()
     elif not settings.workdir.is_absolute():
@@ -215,6 +229,7 @@ def parse(data: dict[str, Any]) -> Settings:
     claude_raw = _table(data.pop("claude", {}), "claude")
     review_raw = _table(data.pop("review", {}), "review")
     repos_raw = data.pop("repos", [])
+    app_raw = data.pop("github_app", None)
     workdir = Path(_str(data.pop("workdir", DEFAULT_WORKDIR), "workdir")).expanduser()
     poll_interval = _int(data.pop("poll_interval", 300), "poll_interval", minimum=10)
     if data:
@@ -234,7 +249,26 @@ def parse(data: dict[str, Any]) -> Settings:
         seen.add(repo.name.lower())
         repos.append(repo)
 
-    return Settings(workdir=workdir, poll_interval=poll_interval, claude=claude, review=review, repos=repos)
+    github_app = _github_app(_table(app_raw, "github_app")) if app_raw is not None else None
+    return Settings(workdir=workdir, poll_interval=poll_interval, claude=claude, review=review, repos=repos,
+                    github_app=github_app)
+
+
+def _github_app(raw: dict[str, Any]) -> GitHubAppConfig:
+    raw = dict(raw)
+    app_id = raw.pop("app_id", None)
+    if isinstance(app_id, bool) or not (isinstance(app_id, int) or (isinstance(app_id, str) and app_id.isdigit())):
+        raise ConfigError("github_app.app_id is required and must be a number")
+    key = raw.pop("private_key", None)
+    if not isinstance(key, str) or not key:
+        raise ConfigError("github_app.private_key is required (path to the app's .pem file)")
+    installation_id = raw.pop("installation_id", None)
+    if installation_id is not None:
+        installation_id = _int(installation_id, "github_app.installation_id", minimum=1)
+    api_url = _str(raw.pop("api_url", "https://api.github.com"), "github_app.api_url").rstrip("/")
+    if raw:
+        raise ConfigError(f"github_app: unknown keys: {', '.join(sorted(raw))}")
+    return GitHubAppConfig(str(app_id), Path(key).expanduser(), installation_id, api_url)
 
 
 def _repo(raw: dict[str, Any], claude_raw: dict[str, Any], review_raw: dict[str, Any], i: int) -> RepoConfig:
