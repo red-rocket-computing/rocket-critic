@@ -1,0 +1,54 @@
+# rocket-critic as a system-wide service that runs as your user, starting at
+# boot without a login session.
+#
+# Install (as root), after replacing "stephen" and the paths below:
+#   cp contrib/systemd/system/rocket-critic.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now rocket-critic
+#
+# Use:
+#   systemctl status rocket-critic
+#   systemctl reload rocket-critic       # re-read config.toml now (it is also reloaded on change)
+#   journalctl -u rocket-critic -f
+#
+# %h is not used here: in system units it means root's home, not User='s.
+
+[Unit]
+Description=rocket-critic pull request reviewer
+Documentation=https://github.com/sgstreet/rocket-critic
+Wants=network-online.target
+After=network-online.target
+# If the reviews use local Ollama models, start after it:
+# After=network-online.target ollama.service
+
+[Service]
+Type=simple
+User=stephen
+Group=stephen
+WorkingDirectory=/home/stephen/Workspace/rocket-critic/work
+ExecStart=/home/stephen/Workspace/rocket-critic/.venv/bin/rocket-critic -w . watch
+ExecReload=/bin/kill -HUP $MAINPID
+
+Environment=HOME=/home/stephen
+Environment=PATH=/home/stephen/.local/bin:/usr/local/bin:/usr/bin:/bin
+# A system service has no desktop keyring, so give gh a token here (GH_TOKEN=...)
+# or log gh in with --insecure-storage. Keep this file private (chmod 600).
+EnvironmentFile=-/home/stephen/.config/rocket-critic/rocket-critic.env
+
+# Stop: SIGTERM goes to the watcher only, which lets a review in progress
+# finish (claude.timeout defaults to 45 minutes); anything still running when
+# TimeoutStopSec expires is killed.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=50min
+
+Restart=on-failure
+RestartSec=30s
+
+# Light hardening that leaves the home directory writable (git, gh and claude
+# keep state there).
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

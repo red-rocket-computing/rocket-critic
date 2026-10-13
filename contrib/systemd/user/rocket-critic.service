@@ -1,0 +1,46 @@
+# rocket-critic as a systemd *user* service.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/systemd/user/rocket-critic.service ~/.config/systemd/user/
+#   # edit the paths below if your checkout or workdir live elsewhere
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now rocket-critic
+#   loginctl enable-linger "$USER"     # keep running when you're logged out / start at boot
+#
+# Use:
+#   systemctl --user status rocket-critic
+#   systemctl --user reload rocket-critic     # re-read config.toml now (it is also reloaded on change)
+#   systemctl --user restart rocket-critic
+#   journalctl --user -u rocket-critic -f
+
+[Unit]
+Description=rocket-critic pull request reviewer
+Documentation=https://github.com/sgstreet/rocket-critic
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Workspace/rocket-critic/work
+ExecStart=%h/Workspace/rocket-critic/.venv/bin/rocket-critic -w . watch
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Tools rocket-critic runs: git, gh, claude (often in ~/.local/bin) and openssl.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Optional settings, e.g. GH_TOKEN for gh without a desktop keyring, or
+# ROCKET_CRITIC_GH_TOKEN for [claude.env]. Keep this file private (chmod 600).
+EnvironmentFile=-%h/.config/rocket-critic/rocket-critic.env
+
+# Stop: SIGTERM goes to the watcher only, which lets a review in progress
+# finish (claude.timeout defaults to 45 minutes); anything still running when
+# TimeoutStopSec expires is killed.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=50min
+
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=default.target

@@ -254,39 +254,87 @@ Each reload is logged with what changed, e.g. `config reloaded from .../config.t
 
 ### As a systemd service
 
-On a server, systemd can supervise the watcher instead of `start`/`stop`. Run `watch` in the foreground and
-let systemd handle restarts and logs:
+On a server, systemd can supervise the watcher instead of `start`/`stop`: it starts it at boot, restarts it
+if it crashes and keeps its logs. systemd runs `watch` in the foreground, and `systemctl reload` sends
+the same SIGHUP as `rocket-critic reload`. Ready-to-copy units are in
+[`contrib/systemd/`](contrib/systemd/):
+
+| File | Runs as | Use when |
+| --- | --- | --- |
+| [`user/rocket-critic.service`](contrib/systemd/user/rocket-critic.service) | you, under `systemctl --user` | no root needed; uses `%h` so paths follow your home directory |
+| [`system/rocket-critic.service`](contrib/systemd/system/rocket-critic.service) | you (`User=`), under the system manager | starts at boot with no login session; needs root to install |
+| [`rocket-critic.env.example`](contrib/systemd/rocket-critic.env.example) | | optional environment (tokens, poll period) |
+
+The user unit, with paths for a checkout in `~/Workspace/rocket-critic` and the workdir in `work/`:
 
 ```ini
 # ~/.config/systemd/user/rocket-critic.service
 [Unit]
-Description=rocket-critic PR reviewer
+Description=rocket-critic pull request reviewer
+Wants=network-online.target
 After=network-online.target
 
 [Service]
+Type=simple
 WorkingDirectory=%h/Workspace/rocket-critic/work
 ExecStart=%h/Workspace/rocket-critic/.venv/bin/rocket-critic -w . watch
 ExecReload=/bin/kill -HUP $MAINPID
-# Let a review in progress finish on stop (claude.timeout is 45 minutes by default).
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.config/rocket-critic/rocket-critic.env
+KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=50min
 Restart=on-failure
-# Environment=ROCKET_CRITIC_GH_TOKEN=...   (not needed with [github_app])
+RestartSec=30s
 
 [Install]
 WantedBy=default.target
 ```
 
+Install and run it:
+
 ```sh
+mkdir -p ~/.config/systemd/user
+cp contrib/systemd/user/rocket-critic.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now rocket-critic
-systemctl --user reload rocket-critic       # re-read the config now
+loginctl enable-linger "$USER"              # keep running after logout, and start at boot
+
+systemctl --user status rocket-critic
+systemctl --user reload rocket-critic       # re-read config.toml now (it's also reloaded on change)
 journalctl --user -u rocket-critic -f
-loginctl enable-linger $USER                # keep it running after you log out
 ```
 
-Make sure the service can find `git`, `gh`, `claude` and `openssl`, either through a `PATH=` line under
-`[Service]` or by using absolute paths in the config. Ollama, if used, must be running too.
+For the system unit, replace `stephen` and the paths in the file, then install it as root:
+
+```sh
+sudo cp contrib/systemd/system/rocket-critic.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now rocket-critic
+journalctl -u rocket-critic -f
+```
+
+Notes:
+
+- **Stopping waits for the review.** `KillMode=mixed` sends SIGTERM to the watcher only, so a review in
+  progress finishes before it exits. Without it, systemd would also signal the `claude` process and cut the
+  review short. `TimeoutStopSec=50min` covers the default 45-minute `claude.timeout`; after that, anything
+  still running is killed. Raise both together if you raise the timeout.
+- **`PATH`.** Services don't load your shell profile. The `Environment=PATH=` line must include the
+  directories holding `git`, `gh`, `claude` (often `~/.local/bin`) and `openssl`. Check with
+  `systemctl --user show-environment` or by reading `doctor` output from the service's context.
+- **`gh` login.** If `gh auth status` says `(keyring)`, the token is in your desktop keyring, which a
+  service often can't unlock (always the case for the system unit). Either log `gh` in again with
+  `gh auth login --insecure-storage`, which keeps the token in `~/.config/gh/hosts.yml` (private to you),
+  or put `GH_TOKEN=...` in the environment file. That token is also what `/code-review` posts with unless
+  `[github_app]` or a `GH_TOKEN` in `[claude.env]` is set.
+- **Environment file.** Copy `contrib/systemd/rocket-critic.env.example` to
+  `~/.config/rocket-critic/rocket-critic.env` and `chmod 600` it. The `-` in `EnvironmentFile=-...` makes it
+  optional. Use plain `KEY=value` lines, without `export`.
+- **Ollama.** If the reviews use local Ollama models, the Ollama server must be running. For the system
+  unit, add `ollama.service` to `After=`.
+- **Don't mix** `systemctl` and `rocket-critic start` for the same workdir: there is only one lock, so
+  the second one refuses to start. `rocket-critic status` shows the watcher either way.
 
 ## Using Ollama models
 
