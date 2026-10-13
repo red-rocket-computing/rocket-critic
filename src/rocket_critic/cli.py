@@ -8,13 +8,22 @@ import re
 import shutil
 import sys
 import time
-from importlib import resources
 from pathlib import Path
 
 import click
 
 from . import __version__, filters, proc
-from .config import DEFAULT_CONFIG_PATH, LEVELS, ConfigError, Settings, load
+from .config import (
+    CONFIG_NAME,
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_WORKDIR,
+    LEVELS,
+    ConfigError,
+    Settings,
+    config_path,
+    load,
+    sample_config,
+)
 from .github import GitHub
 from .poller import AlreadyRunning, Critic, lock
 from .runner import build_command, build_env, parse_envelope
@@ -36,15 +45,16 @@ def parse_pr_ref(ref: str) -> tuple[str, int]:
 
 
 class Ctx:
-    def __init__(self, config_path: Path | None):
+    def __init__(self, config_path: Path | None, workdir: Path | None = None):
         self.config_path = config_path
+        self.workdir = workdir
         self._settings: Settings | None = None
 
     @property
     def settings(self) -> Settings:
         if self._settings is None:
             try:
-                self._settings = load(self.config_path)
+                self._settings = load(self.config_path, self.workdir)
             except ConfigError as exc:
                 raise click.ClickException(str(exc)) from None
         return self._settings
@@ -55,31 +65,57 @@ pass_ctx = click.make_pass_decorator(Ctx)
 
 @click.group()
 @click.option("-c", "--config", "config_path", type=click.Path(path_type=Path),
-              help=f"Config file (default {DEFAULT_CONFIG_PATH}).")
+              help=f"Config file (default WORKDIR/{CONFIG_NAME} with -w, else {DEFAULT_CONFIG_PATH}).")
+@click.option("-w", "--workdir", type=click.Path(file_okay=False, path_type=Path), envvar="ROCKET_CRITIC_WORKDIR",
+              help="Working directory holding the config file and the repo/PR checkouts "
+                   "(overrides the config's workdir). Env: ROCKET_CRITIC_WORKDIR.")
 @click.option("-v", "--verbose", is_flag=True, help="Debug logging.")
 @click.version_option(__version__)
 @click.pass_context
-def cli(ctx: click.Context, config_path: Path | None, verbose: bool) -> None:
+def cli(ctx: click.Context, config_path: Path | None, workdir: Path | None, verbose: bool) -> None:
     """Watch GitHub repos and review pull requests with Claude Code's /code-review."""
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    ctx.obj = Ctx(config_path)
+    ctx.obj = Ctx(config_path, workdir)
 
 
 @cli.command()
+@click.option("--repo", "repos", multiple=True, metavar="OWNER/REPO",
+              help="Repo to watch (repeatable); fills in [[repos]] and creates its directories.")
 @click.option("--force", is_flag=True, help="Overwrite an existing config file.")
 @pass_ctx
-def init(ctx: Ctx, force: bool) -> None:
-    """Write a sample config file."""
-    path = ctx.config_path or DEFAULT_CONFIG_PATH
+def init(ctx: Ctx, repos: tuple[str, ...], force: bool) -> None:
+    """Write a sample config and create the working directory.
+
+    With -w DIR the config goes to DIR/config.toml (with workdir = ".") next
+    to DIR/repos and DIR/prs, so later commands only need -w DIR.
+    """
+    path = config_path(ctx.config_path, ctx.workdir)
+    if ctx.workdir:
+        workdir = ctx.workdir.expanduser().resolve()
+        in_workdir = path.parent.expanduser().resolve() == workdir
+        workdir_value = "." if in_workdir else str(workdir)
+    else:
+        workdir_value = DEFAULT_WORKDIR
+    try:
+        text = sample_config(workdir_value, list(repos))
+    except ConfigError as exc:
+        raise click.BadParameter(str(exc), param_hint="--repo") from None
     if path.exists() and not force:
         raise click.ClickException(f"{path} already exists (use --force to overwrite)")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(resources.files("rocket_critic").joinpath("sample_config.toml").read_text())
-    click.echo(f"wrote {path}; edit [[repos]] and [claude] then run `rocket-critic doctor`")
+    path.write_text(text)
+
+    settings = ctx.settings
+    created = Workspace(settings.workdir).ensure_layout([r.name for r in settings.repos if repos])
+    click.echo(f"wrote {path}")
+    click.echo(f"workdir {settings.workdir}" + (f" (created {len(created)} directories)" if created else ""))
+    hint = f" -w {ctx.workdir}" if ctx.workdir and not ctx.config_path else ""
+    todo = "[claude]" if repos else "[[repos]] and [claude]"
+    click.echo(f"edit {todo} then run `rocket-critic{hint} doctor`")
 
 
 @cli.command()

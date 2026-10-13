@@ -12,11 +12,15 @@ import copy
 import os
 import re
 import tomllib
+from importlib import resources
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+CONFIG_NAME = "config.toml"
+DEFAULT_WORKDIR = "~/.local/share/rocket-critic"
 
 DEFAULT_CONFIG_PATH = Path(
     os.environ.get("ROCKET_CRITIC_CONFIG")
@@ -135,8 +139,23 @@ class Settings:
         return RepoConfig(name=name, claude=copy.deepcopy(self.claude), review=copy.deepcopy(self.review))
 
 
-def load(path: Path | None = None) -> Settings:
-    path = Path(path) if path else DEFAULT_CONFIG_PATH
+def config_path(path: Path | None = None, workdir: Path | None = None) -> Path:
+    """The config file to use: ``path``, else ``<workdir>/config.toml``, else the default."""
+    if path:
+        return Path(path).expanduser()
+    if workdir:
+        return Path(workdir).expanduser() / CONFIG_NAME
+    return DEFAULT_CONFIG_PATH
+
+
+def load(path: Path | None = None, workdir: Path | None = None) -> Settings:
+    """Load the config chosen by :func:`config_path`.
+
+    A relative ``workdir`` in the file is relative to the file's directory, so
+    ``workdir = "."`` keeps a config next to its repo/PR directories. An
+    explicit ``workdir`` argument overrides the file's value.
+    """
+    path = config_path(path, workdir)
     try:
         with open(path, "rb") as fh:
             data = tomllib.load(fh)
@@ -146,6 +165,10 @@ def load(path: Path | None = None) -> Settings:
         raise ConfigError(f"{path}: {exc}") from None
     settings = parse(data)
     settings.path = path
+    if workdir:
+        settings.workdir = Path(workdir).expanduser().resolve()
+    elif not settings.workdir.is_absolute():
+        settings.workdir = (path.parent / settings.workdir).resolve()
     return settings
 
 
@@ -154,7 +177,7 @@ def parse(data: dict[str, Any]) -> Settings:
     claude_raw = _table(data.pop("claude", {}), "claude")
     review_raw = _table(data.pop("review", {}), "review")
     repos_raw = data.pop("repos", [])
-    workdir = Path(str(data.pop("workdir", "~/.local/share/rocket-critic"))).expanduser()
+    workdir = Path(_str(data.pop("workdir", DEFAULT_WORKDIR), "workdir")).expanduser()
     poll_interval = _int(data.pop("poll_interval", 300), "poll_interval", minimum=10)
     if data:
         raise ConfigError(f"unknown top-level keys: {', '.join(sorted(data))}")
@@ -287,3 +310,22 @@ def _strs(value: Any, where: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise ConfigError(f"{where} must be a list of strings")
     return list(value)
+
+
+def sample_config(workdir: str = DEFAULT_WORKDIR, repos: list[str] | None = None) -> str:
+    """The annotated sample config, with ``workdir`` and (optionally) the ``[[repos]]`` entries filled in."""
+    text = resources.files("rocket_critic").joinpath("sample_config.toml").read_text()
+    text = text.replace(f'workdir = "{DEFAULT_WORKDIR}"', f"workdir = {_toml_str(workdir)}", 1)
+    if repos:
+        start = text.index("[[repos]]\n")
+        end = text.index("\n\n", start)
+        block = text[start:end]
+        for name in repos:
+            _check_repo_name(name)
+        entries = [block.replace('name = "owner/repo"', f"name = {_toml_str(name)}") for name in repos]
+        text = text[:start] + "\n\n".join(entries) + text[end:]
+    return text
+
+
+def _toml_str(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'

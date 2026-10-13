@@ -70,3 +70,39 @@ def test_env_expansion_drops_unset_refs():
 def test_validation(data, msg):
     with pytest.raises(ConfigError, match=msg):
         parse(data)
+
+
+def test_relative_workdir_is_relative_to_config_file(tmp_path):
+    from rocket_critic.config import load
+
+    cfg = tmp_path / "setup" / "config.toml"
+    cfg.parent.mkdir()
+    cfg.write_text('workdir = "."\n')
+    assert load(cfg).workdir == cfg.parent.resolve()
+    cfg.write_text('workdir = "data"\n')
+    assert load(cfg).workdir == (cfg.parent / "data").resolve()
+
+
+def test_workdir_argument_picks_config_and_overrides(tmp_path):
+    from rocket_critic.config import config_path, load
+
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    (wd / "config.toml").write_text('workdir = "/somewhere/else"\n')
+    assert config_path(None, wd) == wd / "config.toml"
+    assert load(workdir=wd).workdir == wd.resolve()
+    other = tmp_path / "other.toml"
+    other.write_text("")
+    s = load(other, wd)  # explicit config wins for the file, -w for the directory
+    assert s.path == other and s.workdir == wd.resolve()
+
+
+def test_sample_config_fills_workdir_and_repos():
+    from rocket_critic.config import sample_config
+
+    s = parse(tomllib.loads(sample_config('/a "b"', ["o/one", "o/two"])))
+    assert str(s.workdir) == '/a "b"'
+    assert [r.name for r in s.repos] == ["o/one", "o/two"]
+    assert s.repos[1].ignore_authors == ["dependabot[bot]", "renovate[bot]"]
+    with pytest.raises(ConfigError):
+        sample_config(".", ["nope"])

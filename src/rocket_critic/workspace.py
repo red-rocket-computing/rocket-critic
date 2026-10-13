@@ -17,6 +17,19 @@ class Workspace:
         self.git = git
         self.remote_base = remote_base
 
+    def ensure_layout(self, repos: list[str] = ()) -> list[Path]:
+        """Create the workdir and its repos/ prs/ runs/ directories, plus per-repo ones for ``repos``.
+
+        Returns the directories that did not exist before.
+        """
+        dirs = [self.workdir, self.workdir / "repos", self.workdir / "prs", self.workdir / "runs"]
+        for repo in repos:
+            dirs += [self.bare_path(repo).parent, self.workdir / "prs" / repo, self.workdir / "runs" / repo]
+        created = [d for d in dirs if not d.exists()]
+        for d in dirs:
+            d.mkdir(parents=True, exist_ok=True)
+        return created
+
     def bare_path(self, repo: str) -> Path:
         return self.workdir / "repos" / f"{repo}.git"
 

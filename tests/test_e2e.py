@@ -331,6 +331,29 @@ def test_interrupted_run_that_posted_needs_attention(env, monkeypatch):
     assert env.state().get("o/r", 1, env.pr_sha).status == ATTENTION
 
 
+def test_init_workdir_then_watch_with_it(env, tmp_path):
+    wd = tmp_path / "wd"
+    run = lambda *a: CliRunner().invoke(cli, ["-w", str(wd), *a], catch_exceptions=False)  # noqa: E731
+    res = run("init", "--repo", "o/r")
+    assert res.exit_code == 0, res.output
+    assert 'workdir = "."' in (wd / "config.toml").read_text()
+    for d in ("repos/o", "prs/o/r", "runs/o/r"):
+        assert (wd / d).is_dir(), d
+    assert run("init", "--repo", "bad").exit_code != 0
+    assert run("init").exit_code != 0  # exists
+
+    assert run("watch", "--once").exit_code == 0
+    assert len(env.calls()) == 1
+    assert Path(env.calls()[0]["cwd"]).is_relative_to(wd / "prs" / "o" / "r")
+    assert (wd / "repos" / "o" / "r.git" / "HEAD").exists()
+    assert State(wd / "state.db").get("o/r", 1, env.pr_sha).status == DONE
+    assert "o/r#1" in run("status").output
+
+    monkey_env = {"ROCKET_CRITIC_WORKDIR": str(wd)}
+    res = CliRunner().invoke(cli, ["status"], env=monkey_env, catch_exceptions=False)
+    assert "o/r#1" in res.output
+
+
 def test_clean_and_init(env, tmp_path):
     cfg = tmp_path / "new" / "config.toml"
     res = CliRunner().invoke(cli, ["-c", str(cfg), "init"])

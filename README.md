@@ -39,18 +39,33 @@ rocket-critic review owner/repo#123 --no-comment   # try one PR without posting 
 rocket-critic watch                # poll forever
 ```
 
+Or keep everything for a setup in one directory:
+
+```sh
+rocket-critic -w ~/critic init --repo owner/repo   # ~/critic/config.toml + repos/ prs/ runs/
+$EDITOR ~/critic/config.toml
+rocket-critic -w ~/critic doctor
+rocket-critic -w ~/critic watch
+```
+
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `init [--force]` | Write a sample config. |
+| `init [--repo o/r ...] [--force]` | Write a sample config and create the working directory with its `repos/`, `prs/` and `runs/` directories. `--repo` fills in `[[repos]]` and creates that repo's directories. With `-w DIR` the config is written to `DIR/config.toml`. |
 | `doctor` | Check `gh` auth, repo access, the `claude` binary, a test prompt against each configured model, and the GitHub login `/code-review` will post as. |
 | `watch [--once] [--repo o/r ...]` | Poll the configured repos every `poll_interval` seconds and review PRs that need it. One instance per workdir; Ctrl-C stops after the current review, and a second Ctrl-C aborts it. |
 | `review o/r#N [--level L] [--model M] [--comment/--no-comment] [--force] [--full]` | Review one PR now. Also accepts a PR URL. `--force` ignores filters, history and the per-PR review limit. `--full` reviews the whole PR without earlier-review context. `--no-comment` prints the findings without posting them. |
 | `status [--repo o/r] [-n N]` | Recent reviews from the state database. |
 | `clean` | Remove leftover PR worktrees. |
 
-Global options: `-c/--config PATH` (or `$ROCKET_CRITIC_CONFIG`), `-v/--verbose`.
+Global options:
+
+- `-w/--workdir DIR` (or `$ROCKET_CRITIC_WORKDIR`): the working directory. Its `config.toml` is the config
+  file unless `-c` is given, and it holds the repo and PR checkouts, overriding the config's `workdir`.
+- `-c/--config PATH` (or `$ROCKET_CRITIC_CONFIG`): the config file. Defaults to `DIR/config.toml` with
+  `-w`, else `~/.config/rocket-critic/config.toml`.
+- `-v/--verbose`: debug logging.
 
 ## Configuration
 
@@ -129,7 +144,12 @@ This context is appended to the `/code-review` arguments, because `/code-review`
 
 ### Working directory
 
+`workdir` in the config sets the working directory. A relative path is relative to the config file's
+directory, so a config written by `rocket-critic -w DIR init` has `workdir = "."` and keeps working if
+DIR is moved. `-w DIR` on the command line overrides it. Its layout:
+
 ```
+<workdir>/config.toml                  config file, when created with `-w <workdir> init`
 <workdir>/repos/<owner>/<repo>.git     bare partial clone, shared by all PRs of a repo; keeps
                                        refs/rocket-critic/reviewed/<N> at the last reviewed commit
 <workdir>/prs/<owner>/<repo>/<N>-<sha> worktree for one review (removed afterwards unless keep_worktrees)
