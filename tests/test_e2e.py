@@ -736,6 +736,28 @@ def test_add_repo_request_mode_and_commands(env):
     assert (two.labels, two.label_mode, two.commands) == (["ai-review"], "request", ["/review"])
 
 
+@pytest.mark.parametrize("value, shown", [("90", "90s"), ("30s", "30s"), ("5m", "5m"), ("1h", "1h"), ("120", "2m")])
+def test_watch_interval_option(env, caplog, value, shown):
+    caplog.set_level("INFO")
+    assert env.run("watch", "--once", "--interval", value).exit_code == 0
+    assert f"watching o/r every {shown}" in caplog.text
+
+
+def test_watch_interval_from_env_and_config(env, caplog, monkeypatch):
+    caplog.set_level("INFO")
+    assert env.run("watch", "--once").exit_code == 0
+    assert "watching o/r every 1m" in caplog.text  # poll_interval = 60 in the test config
+    monkeypatch.setenv("ROCKET_CRITIC_POLL_INTERVAL", "15m")
+    assert env.run("watch", "--once").exit_code == 0
+    assert "watching o/r every 15m" in caplog.text
+
+
+@pytest.mark.parametrize("value", ["5", "0m", "soon", "1d", "-30"])
+def test_watch_interval_rejects_bad_values(env, value):
+    res = CliRunner().invoke(cli, ["-c", str(env.config), "watch", "--once", "-i", value])
+    assert res.exit_code == 2 and "Invalid value for '-i' / '--interval'" in res.output
+
+
 def test_clean_and_init(env, tmp_path):
     cfg = tmp_path / "new" / "config.toml"
     res = CliRunner().invoke(cli, ["-c", str(cfg), "init"])

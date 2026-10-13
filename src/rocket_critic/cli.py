@@ -19,6 +19,7 @@ from .config import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_WORKDIR,
     LEVELS,
+    MIN_POLL_INTERVAL,
     PLACEHOLDER_REPO,
     ClaudeConfig,
     ConfigError,
@@ -328,13 +329,36 @@ def doctor(ctx: Ctx) -> None:
         sys.exit(1)
 
 
+class Duration(click.ParamType):
+    """Seconds, or a number with an s/m/h suffix (e.g. 90, 30s, 5m, 1h)."""
+
+    name = "DURATION"
+    _units = {"s": 1, "m": 60, "h": 3600}
+
+    def convert(self, value, param, ctx):
+        if isinstance(value, int):
+            return value
+        m = re.fullmatch(r"\s*(\d+)\s*([smh]?)\s*", str(value).lower())
+        if not m:
+            self.fail(f"{value!r} is not a duration like 90, 30s, 5m or 1h", param, ctx)
+        seconds = int(m.group(1)) * self._units[m.group(2) or "s"]
+        if seconds < MIN_POLL_INTERVAL:
+            self.fail(f"must be at least {MIN_POLL_INTERVAL}s", param, ctx)
+        return seconds
+
+
 @cli.command()
 @click.option("--once", is_flag=True, help="Poll a single time and exit.")
 @click.option("--repo", "only", multiple=True, help="Only watch this owner/repo (repeatable).")
+@click.option("-i", "--interval", type=Duration(), envvar="ROCKET_CRITIC_POLL_INTERVAL",
+              help="Time between polls, e.g. 90, 30s, 5m, 1h (default: poll_interval from the config). "
+                   "Env: ROCKET_CRITIC_POLL_INTERVAL.")
 @pass_ctx
-def watch(ctx: Ctx, once: bool, only: tuple[str, ...]) -> None:
+def watch(ctx: Ctx, once: bool, only: tuple[str, ...], interval: int | None) -> None:
     """Poll repos and review new or updated pull requests."""
     s = ctx.settings
+    if interval is not None:
+        s.poll_interval = interval  # also the base of the retry backoff
     repos = [s.repo(name) for name in only] if only else s.repos
     if not repos:
         raise click.ClickException("no repos configured")
@@ -343,7 +367,7 @@ def watch(ctx: Ctx, once: bool, only: tuple[str, ...]) -> None:
             warn_unresolved_env(s)
             critic = Critic(s)
             critic.install_signal_handlers()
-            log.info("watching %s every %ss", ", ".join(r.name for r in repos), s.poll_interval)
+            log.info("watching %s every %s", ", ".join(r.name for r in repos), format_duration(s.poll_interval))
             critic.watch(repos, once=once)
     except AlreadyRunning as exc:
         raise click.ClickException(str(exc)) from None
@@ -421,6 +445,13 @@ def clean(ctx: Ctx) -> None:
     except AlreadyRunning as exc:
         raise click.ClickException(str(exc)) from None
     click.echo(f"removed {len(removed)} worktree(s)")
+
+
+def format_duration(seconds: int) -> str:
+    for unit, size in (("h", 3600), ("m", 60)):
+        if seconds >= size and seconds % size == 0:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
 
 
 def main() -> None:

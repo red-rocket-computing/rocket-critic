@@ -19,6 +19,7 @@ from typing import Any
 
 LEVELS = ("low", "medium", "high", "xhigh", "max")
 LABEL_MODES = ("sticky", "request")
+MIN_POLL_INTERVAL = 10  # seconds
 
 CONFIG_NAME = "config.toml"
 DEFAULT_WORKDIR = "~/.local/share/rocket-critic"
@@ -237,7 +238,7 @@ def parse(data: dict[str, Any]) -> Settings:
     repos_raw = data.pop("repos", [])
     app_raw = data.pop("github_app", None)
     workdir = Path(_str(data.pop("workdir", DEFAULT_WORKDIR), "workdir")).expanduser()
-    poll_interval = _int(data.pop("poll_interval", 300), "poll_interval", minimum=10)
+    poll_interval = _int(data.pop("poll_interval", 300), "poll_interval", minimum=MIN_POLL_INTERVAL)
     if data:
         raise ConfigError(f"unknown top-level keys: {', '.join(sorted(data))}")
 
