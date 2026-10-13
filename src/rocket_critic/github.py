@@ -86,26 +86,29 @@ class GitHub:
         out = self._run(*args, env=env)
         return json.loads(out) if out.strip() else None
 
+    def _paginate(self, path: str, env: Mapping[str, str] | None = None) -> list[Any]:
+        """All items of a paginated list endpoint.
+
+        Avoids ``--slurp``, which only exists in gh 2.48+: without it gh
+        prints one JSON array per page, back to back.
+        """
+        return [item for page in parse_pages(self._run("api", "--paginate", path, env=env)) for item in page]
+
     # REST rather than GraphQL (`gh pr list --json`): cheaper on rate limits and
     # usable with tokens and proxies that only allow the REST API.
 
     def list_open_prs(self, repo: str) -> list[PullRequest]:
-        pages = self._json("api", "--paginate", "--slurp", f"repos/{repo}/pulls?state=open&per_page=100")
-        return [PullRequest.from_rest(repo, item) for page in pages or [] for item in page]
+        return [PullRequest.from_rest(repo, item) for item in self._paginate(f"repos/{repo}/pulls?state=open&per_page=100")]
 
     def get_pr(self, repo: str, number: int) -> PullRequest:
         return PullRequest.from_rest(repo, self._json("api", f"repos/{repo}/pulls/{number}"))
 
     def reviewed_shas(self, repo: str, number: int, login: str, env: Mapping[str, str] | None = None) -> set[str]:
         """Head SHAs ``login`` has already left a review (or review comment) on."""
-        pages = self._json(
-            "api", "--paginate", "--slurp", f"repos/{repo}/pulls/{number}/reviews", env=env
-        )
         shas: set[str] = set()
-        for page in pages or []:
-            for review in page:
-                if (review.get("user") or {}).get("login", "").lower() == login.lower() and review.get("commit_id"):
-                    shas.add(review["commit_id"])
+        for review in self._paginate(f"repos/{repo}/pulls/{number}/reviews?per_page=100", env=env):
+            if (review.get("user") or {}).get("login", "").lower() == login.lower() and review.get("commit_id"):
+                shas.add(review["commit_id"])
         return shas
 
     def posted_since(self, repo: str, number: int, login: str, since: float) -> bool:
@@ -113,34 +116,32 @@ class GitHub:
         login = login.lower()
         stamp = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         sources = (
-            (f"repos/{repo}/pulls/{number}/reviews", "submitted_at"),
-            (f"repos/{repo}/pulls/{number}/comments?since={stamp}", "created_at"),
-            (f"repos/{repo}/issues/{number}/comments?since={stamp}", "created_at"),
+            (f"repos/{repo}/pulls/{number}/reviews?per_page=100", "submitted_at"),
+            (f"repos/{repo}/pulls/{number}/comments?per_page=100&since={stamp}", "created_at"),
+            (f"repos/{repo}/issues/{number}/comments?per_page=100&since={stamp}", "created_at"),
         )
         for path, time_key in sources:
-            for page in self._json("api", "--paginate", "--slurp", path) or []:
-                for item in page:
-                    if (item.get("user") or {}).get("login", "").lower() != login:
-                        continue
-                    if _ts(item.get(time_key)) >= int(since):
-                        return True
+            for item in self._paginate(path):
+                if (item.get("user") or {}).get("login", "").lower() != login:
+                    continue
+                if _ts(item.get(time_key)) >= int(since):
+                    return True
         return False
 
     def review_threads(self, repo: str, number: int) -> list[Thread]:
         """Inline review threads on the PR, oldest first."""
         threads: dict[int, Thread] = {}
         replies: list[dict[str, Any]] = []
-        for page in self._json("api", "--paginate", "--slurp", f"repos/{repo}/pulls/{number}/comments") or []:
-            for c in page:
-                if c.get("in_reply_to_id"):
-                    replies.append(c)
-                else:
-                    threads[c["id"]] = Thread(
-                        path=c.get("path") or "",
-                        line=c.get("line"),
-                        author=(c.get("user") or {}).get("login") or "",
-                        body=c.get("body") or "",
-                    )
+        for c in self._paginate(f"repos/{repo}/pulls/{number}/comments?per_page=100"):
+            if c.get("in_reply_to_id"):
+                replies.append(c)
+            else:
+                threads[c["id"]] = Thread(
+                    path=c.get("path") or "",
+                    line=c.get("line"),
+                    author=(c.get("user") or {}).get("login") or "",
+                    body=c.get("body") or "",
+                )
         for c in replies:
             thread = threads.get(c["in_reply_to_id"])
             if thread is not None:
@@ -157,6 +158,20 @@ class GitHub:
     def auth_status(self) -> tuple[bool, str]:
         res = proc.run([self.gh, "auth", "status"], env=self.env, timeout=60, check=False)
         return res.returncode == 0, (res.stdout + res.stderr).strip()
+
+
+def parse_pages(text: str) -> list[Any]:
+    """Decode back-to-back JSON values (one per page) from ``gh api --paginate`` output."""
+    decoder = json.JSONDecoder()
+    pages: list[Any] = []
+    pos = 0
+    while True:
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        if pos >= len(text):
+            return pages
+        page, pos = decoder.raw_decode(text, pos)
+        pages.append(page)
 
 
 def _ts(value: str | None) -> int:

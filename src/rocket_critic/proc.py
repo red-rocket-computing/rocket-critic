@@ -24,9 +24,11 @@ class CommandError(RuntimeError):
         if timed_out:
             msg = f"command timed out: {_short(cmd)}"
         else:
-            detail = (stderr or stdout).strip().splitlines()
-            tail = detail[-1] if detail else ""
-            msg = f"command failed ({returncode}): {_short(cmd)}" + (f": {tail}" if tail else "")
+            # The first line carries the error (e.g. "unknown flag: --slurp"
+            # ahead of a usage dump); HTTP errors are a single line anyway.
+            detail = [line for line in (stderr or stdout).strip().splitlines() if line.strip()]
+            first = detail[0].strip() if detail else ""
+            msg = f"command failed ({returncode}): {_short(cmd)}" + (f": {first}" if first else "")
         super().__init__(msg)
 
 

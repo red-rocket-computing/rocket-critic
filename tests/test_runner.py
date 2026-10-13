@@ -95,3 +95,19 @@ def test_rereview_context_modes_and_cap():
     many = [Thread("x.py", i, "bot", "y" * 500) for i in range(200)]
     text = rereview_context("abc", "range", many)
     assert len(text) < MAX_THREADS_CHARS + 2000 and "more thread(s) omitted" in text
+
+
+def test_parse_pages():
+    from rocket_critic.github import parse_pages
+
+    assert parse_pages("") == []
+    assert parse_pages("[]\n") == [[]]
+    assert parse_pages('[1][2, 3]') == [[1], [2, 3]]
+    assert parse_pages('[{"a": "]["}]\n[\n{"b": 2}]\n') == [[{"a": "]["}], [{"b": 2}]]
+
+
+def test_command_error_reports_first_line():
+    from rocket_critic.proc import CommandError
+
+    err = CommandError(["gh", "api"], 1, "", "unknown flag: --slurp\n\nUsage:  gh api\n  --verbose  x\n")
+    assert str(err).endswith(": unknown flag: --slurp")

@@ -15,15 +15,27 @@ def out(obj):
     sys.exit(0)
 
 
+def pages(items, size=2):
+    """Paginated output as gh before 2.48 prints it: one JSON array per page, back to back."""
+    chunks = [items[i:i + size] for i in range(0, len(items), size)] or [[]]
+    print("".join(json.dumps(c) for c in chunks))
+    sys.exit(0)
+
+
+if "--slurp" in args:
+    print("unknown flag: --slurp\n\nUsage:  gh api <endpoint> [flags]\n  --verbose   Include full HTTP", file=sys.stderr)
+    sys.exit(1)
+
+
 if args[:2] == ["auth", "status"]:
     print("github.com\n  ✓ Logged in to github.com account tester")
     sys.exit(0)
 path = next((a for a in args if a.startswith("repos/")), "")
 route = path.split("?", 1)[0]
-if args[0] == "api" and "/pulls?" in path:
+if args[0] == "api" and route.endswith("/pulls"):
     # List form: no additions/deletions.
-    out([[{k: v for k, v in pr.items() if k not in ("additions", "deletions")} for pr in data.get("prs", [])]])
-if args[0] == "api" and path.count("/") == 4 and path.split("/")[3] == "pulls":
+    pages([{k: v for k, v in pr.items() if k not in ("additions", "deletions")} for pr in data.get("prs", [])])
+if args[0] == "api" and route.count("/") == 4 and route.split("/")[3] == "pulls":
     num = int(path.rsplit("/", 1)[-1])
     for pr in data.get("prs", []):
         if pr["number"] == num:
@@ -37,10 +49,10 @@ if args[:2] == ["api", "user"]:
     print(login)
     sys.exit(0)
 if args[0] == "api" and route.endswith("/reviews"):
-    out([data.get("reviews", [])])
+    pages(data.get("reviews", []))
 if args[0] == "api" and route.endswith("/comments") and "/pulls/" in route:
-    out([data.get("comments", [])])
+    pages(data.get("comments", []))
 if args[0] == "api" and route.endswith("/comments") and "/issues/" in route:
-    out([data.get("issue_comments", [])])
+    pages(data.get("issue_comments", []))
 print(f"fake gh: unsupported {args}", file=sys.stderr)
 sys.exit(2)
