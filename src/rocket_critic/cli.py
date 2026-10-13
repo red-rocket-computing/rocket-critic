@@ -20,8 +20,10 @@ from .config import (
     LEVELS,
     ConfigError,
     Settings,
+    add_repo,
     config_path,
     load,
+    repo_block,
     sample_config,
 )
 from .github import GitHub
@@ -117,6 +119,55 @@ def init(ctx: Ctx, repos: tuple[str, ...], force: bool) -> None:
     hint = f" -w {ctx.workdir}" if ctx.workdir and not ctx.config_path else ""
     todo = "[claude]" if repos else "[[repos]] and [claude]"
     click.echo(f"edit {todo} then run `rocket-critic{hint} doctor`")
+
+
+@cli.command("add-repo")
+@click.argument("name", metavar="OWNER/REPO")
+@click.option("--label", "labels", multiple=True, help="Review PRs with this label (repeatable).")
+@click.option("--reviewer", "reviewers", multiple=True,
+              help="Review PRs requesting review from this user or org/team (repeatable).")
+@click.option("--base", "base_branches", multiple=True, help="Only PRs targeting this branch (repeatable).")
+@click.option("--ignore-author", "ignore_authors", multiple=True,
+              help="Skip PRs by this author (repeatable; replaces the default bot list).")
+@click.option("--drafts/--no-drafts", default=None, help="Also review draft PRs (default: skip them).")
+@click.option("--no-check", is_flag=True, help="Don't check that the repo is reachable with gh.")
+@pass_ctx
+def add_repo_cmd(ctx: Ctx, name: str, labels: tuple[str, ...], reviewers: tuple[str, ...],
+                 base_branches: tuple[str, ...], ignore_authors: tuple[str, ...], drafts: bool | None,
+                 no_check: bool) -> None:
+    """Add a repo to watch to the config file.
+
+    The entry is appended (or replaces the sample's owner/repo placeholder),
+    keeping the file's comments. Edit the file for per-repo [claude]/[review]
+    overrides.
+    """
+    s = ctx.settings
+    try:
+        block = repo_block(
+            name,
+            skip_drafts=None if drafts is None else not drafts,
+            labels=list(labels) or None,
+            reviewers=list(reviewers) or None,
+            ignore_authors=list(ignore_authors) or None,
+            base_branches=list(base_branches) or None,
+        )
+    except ConfigError as exc:
+        raise click.BadParameter(str(exc), param_hint="OWNER/REPO") from None
+    if any(r.name.lower() == name.lower() for r in s.repos):
+        raise click.ClickException(f"{name} is already in {s.path}")
+    if not no_check:
+        try:
+            prs = GitHub().list_open_prs(name)
+        except proc.CommandError as exc:
+            raise click.ClickException(f"cannot list PRs in {name}: {exc} (use --no-check to add it anyway)")
+        click.echo(f"{name}: reachable, {len(prs)} open PR(s)")
+    try:
+        replaced = add_repo(s.path, block)
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from None
+    created = Workspace(s.workdir).ensure_layout([name])
+    what = "replaced the owner/repo placeholder with" if replaced else "added"
+    click.echo(f"{what} {name} in {s.path}" + (f"; created {len(created)} directories" if created else ""))
 
 
 @cli.command()

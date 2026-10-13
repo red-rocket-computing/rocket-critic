@@ -341,19 +341,86 @@ def _strs(value: Any, where: str) -> list[str]:
     return list(value)
 
 
+PLACEHOLDER_REPO = "owner/repo"
+
+
+def _template() -> str:
+    return resources.files("rocket_critic").joinpath("sample_config.toml").read_text()
+
+
+def _block_span(text: str, name: str) -> tuple[int, int] | None:
+    """Span of the ``[[repos]]`` header line through the end of its key lines for repo ``name``."""
+    m = re.search(r'^\[\[repos\]\][ \t]*\n(?:[^\n\[].*\n)*?name = "' + re.escape(name) + r'".*\n(?:[^\n\[#].*\n)*',
+                  text, re.M)
+    return (m.start(), m.end()) if m else None
+
+
+def repo_block(
+    name: str,
+    *,
+    skip_drafts: bool | None = None,
+    labels: list[str] | None = None,
+    reviewers: list[str] | None = None,
+    ignore_authors: list[str] | None = None,
+    base_branches: list[str] | None = None,
+) -> str:
+    """A commented ``[[repos]]`` entry like the sample config's, with the given settings."""
+    _check_repo_name(name)
+    text = _template()
+    start, end = _block_span(text, PLACEHOLDER_REPO)
+    block = text[start:end].replace(f'name = "{PLACEHOLDER_REPO}"', f"name = {_toml_str(name)}")
+    values = {"skip_drafts": skip_drafts, "labels": labels, "reviewers": reviewers,
+              "ignore_authors": ignore_authors, "base_branches": base_branches}
+    for key, value in values.items():
+        if value is None:
+            continue
+        rendered = ("true" if value else "false") if isinstance(value, bool) else (
+            "[" + ", ".join(_toml_str(v) for v in value) + "]")
+        line = re.search(rf"^{key} = [^#\n]*?(\s*#.*)?$", block, re.M)
+        comment = line.group(1) or ""
+        # Keep the trailing comment aligned when the value fits in the old column.
+        pad = max(1, len(line.group(0)) - len(comment.lstrip()) - len(f"{key} = {rendered}")) if comment else 0
+        block = block[:line.start()] + f"{key} = {rendered}" + (" " * pad + comment.lstrip() if comment else "") + \
+            block[line.end():]
+    return block
+
+
 def sample_config(workdir: str = DEFAULT_WORKDIR, repos: list[str] | None = None) -> str:
     """The annotated sample config, with ``workdir`` and (optionally) the ``[[repos]]`` entries filled in."""
-    text = resources.files("rocket_critic").joinpath("sample_config.toml").read_text()
+    text = _template()
     text = text.replace(f'workdir = "{DEFAULT_WORKDIR}"', f"workdir = {_toml_str(workdir)}", 1)
     if repos:
-        start = text.index("[[repos]]\n")
-        end = text.index("\n\n", start)
-        block = text[start:end]
-        for name in repos:
-            _check_repo_name(name)
-        entries = [block.replace('name = "owner/repo"', f"name = {_toml_str(name)}") for name in repos]
-        text = text[:start] + "\n\n".join(entries) + text[end:]
+        start, end = _block_span(text, PLACEHOLDER_REPO)
+        entries = [repo_block(name) for name in repos]
+        text = text[:start] + "\n".join(entries) + text[end:]
     return text
+
+
+def add_repo(path: Path, block: str) -> bool:
+    """Add a ``[[repos]]`` entry to the config file at ``path``, keeping its comments and layout.
+
+    The sample's ``owner/repo`` placeholder entry is replaced; otherwise the entry is
+    appended. The result is validated before the file is (atomically) rewritten.
+    Returns True if the placeholder was replaced.
+    """
+    text = path.read_text()
+    current = parse(tomllib.loads(text))
+    new = parse(tomllib.loads(block)).repos[0].name
+    if any(r.name.lower() == new.lower() for r in current.repos):
+        raise ConfigError(f"{new} is already in {path}")
+    span = _block_span(text, PLACEHOLDER_REPO)
+    if span:
+        text = text[:span[0]] + block + text[span[1]:]
+    else:
+        text = text.rstrip("\n") + "\n\n" + block
+    try:
+        parse(tomllib.loads(text))
+    except (ConfigError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f"adding {new} would make {path} invalid: {exc}") from None
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+    return span is not None
 
 
 def _toml_str(value: str) -> str:

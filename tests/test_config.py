@@ -156,3 +156,18 @@ def test_cwd_config_relative_workdir(places):
     here = write("cwd", 20)
     here.write_text('workdir = "state"\n')
     assert load().workdir == (here.parent / "state").resolve()
+
+
+def test_add_repo_after_per_repo_subtables(tmp_path):
+    from rocket_critic.config import add_repo, load, repo_block
+
+    p = tmp_path / "config.toml"
+    p.write_text('# keep me\n[[repos]]\nname = "a/one"\n[repos.review]\nlevel = "high"\n'
+                 '[repos.claude.env]\nX = "1"\n')
+    assert add_repo(p, repo_block("b/two", base_branches=["main"])) is False
+    one, two = load(p).repos
+    assert (one.review.level, one.claude.env) == ("high", {"X": "1"})
+    assert (two.name, two.review.level, two.claude.env, two.base_branches) == ("b/two", "medium", {}, ["main"])
+    assert p.read_text().startswith("# keep me\n")
+    with pytest.raises(ConfigError, match="already in"):
+        add_repo(p, repo_block("A/One"))

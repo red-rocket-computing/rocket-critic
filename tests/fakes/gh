@@ -32,6 +32,9 @@ if args[:2] == ["auth", "status"]:
     sys.exit(0)
 path = next((a for a in args if a.startswith("repos/")), "")
 route = path.split("?", 1)[0]
+if path.startswith("repos/o/missing"):
+    print("gh: Not Found (HTTP 404)", file=sys.stderr)
+    sys.exit(1)
 if args[0] == "api" and route.endswith("/pulls"):
     # List form: no additions/deletions.
     pages([{k: v for k, v in pr.items() if k not in ("additions", "deletions")} for pr in data.get("prs", [])])

@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from rocket_critic.cli import cli, parse_pr_ref
+from rocket_critic.config import load
 from rocket_critic.state import ATTENTION, DONE, FAILED, PENDING, PHASE_REVIEW, SKIPPED, State
 
 FAKES = Path(__file__).parent / "fakes"
@@ -448,6 +449,42 @@ def test_rerequest_with_rereview_on_push_disabled(env):
     request_review(env)
     assert env.run("watch", "--once").exit_code == 0
     assert len(env.calls()) == 2
+
+
+def test_add_repo(env):
+    res = env.run("add-repo", "o/two", "--reviewer", "rc-bot", "--label", "ai-review", "--drafts")
+    assert res.exit_code == 0, res.output
+    assert "reachable, 2 open PR(s)" in res.output
+    text = env.config.read_text()
+    assert text.index('name = "o/r"') < text.index('name = "o/two"')
+    s = load(env.config)
+    two = s.repo("o/two")
+    assert two.reviewers == ["rc-bot"] and two.labels == ["ai-review"] and two.skip_drafts is False
+    assert two.ignore_authors == ["dependabot[bot]", "renovate[bot]"]
+    assert (env.workdir / "prs" / "o" / "two").is_dir()
+
+    res = env.run("add-repo", "O/Two")
+    assert res.exit_code != 0 and "already in" in res.output
+    res = env.run("add-repo", "not-a-repo")
+    assert res.exit_code != 0 and "owner/name" in res.output
+    res = env.run("add-repo", "o/missing")
+    assert res.exit_code != 0 and "Not Found" in res.output and "o/missing" not in env.config.read_text()
+    assert env.run("add-repo", "o/missing", "--no-check").exit_code == 0
+    assert [r.name for r in load(env.config).repos] == ["o/r", "o/two", "o/missing"]
+
+
+def test_add_repo_replaces_sample_placeholder(env, tmp_path):
+    wd = tmp_path / "wd"
+    run = lambda *a: CliRunner().invoke(cli, ["-w", str(wd), *a], catch_exceptions=False)  # noqa: E731
+    assert run("init").exit_code == 0
+    res = run("add-repo", "o/r")
+    assert res.exit_code == 0 and "replaced the owner/repo placeholder" in res.output
+    text = (wd / "config.toml").read_text()
+    assert "owner/repo" not in text.split("# Per-repo overrides")[0]
+    assert "# Per-repo overrides" in text  # comments kept
+    assert [r.name for r in load(wd / "config.toml").repos] == ["o/r"]
+    assert run("add-repo", "o/two").exit_code == 0
+    assert [r.name for r in load(wd / "config.toml").repos] == ["o/r", "o/two"]
 
 
 def test_clean_and_init(env, tmp_path):

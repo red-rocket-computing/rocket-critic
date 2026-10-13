@@ -53,6 +53,7 @@ rocket-critic -w ~/critic watch
 | Command | What it does |
 | --- | --- |
 | `init [--repo o/r ...] [--force]` | Write a sample config and create the working directory with its `repos/`, `prs/` and `runs/` directories. `--repo` fills in `[[repos]]` and creates that repo's directories. With `-w DIR` the config is written to `DIR/config.toml`. |
+| `add-repo o/r [--reviewer NAME ...] [--label L ...] [--base BRANCH ...] [--ignore-author LOGIN ...] [--drafts] [--no-check]` | Add a repo to the config file found by the usual search. Comments and layout are kept; the sample's `owner/repo` placeholder is replaced, otherwise the entry is appended. Checks with `gh` that the repo is reachable (skip with `--no-check`), refuses duplicates, and creates the repo's directories. Edit the file afterwards for per-repo `[claude]`/`[review]` overrides. |
 | `doctor` | Check `gh` auth, repo access, the `claude` binary, a test prompt against each configured model, and the GitHub login `/code-review` will post as. |
 | `watch [--once] [--repo o/r ...]` | Poll the configured repos every `poll_interval` seconds and review PRs that need it. One instance per workdir; Ctrl-C stops after the current review, and a second Ctrl-C aborts it. |
 | `review o/r#N [--level L] [--model M] [--comment/--no-comment] [--force] [--full]` | Review one PR now. Also accepts a PR URL. `--force` ignores filters, history and the per-PR review limit. `--full` reviews the whole PR without earlier-review context. `--no-comment` prints the findings without posting them. |
