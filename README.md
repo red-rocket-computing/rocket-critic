@@ -48,6 +48,9 @@ rocket-critic -w ~/critic doctor
 rocket-critic -w ~/critic watch
 ```
 
+By default, reviews post as your own GitHub account. To post as a bot such as `rocket-critic[bot]`, set up a
+[GitHub App](#github-app) before running `watch`.
+
 ## Commands
 
 | Command | What it does |
@@ -222,12 +225,30 @@ injection. rocket-critic limits what such a PR can do:
   covers read-only file tools, read-only `git` commands, and the `gh` commands `/code-review` needs.
   `Edit`, `Write`, `WebFetch` and `WebSearch` are disallowed, and `--fix` is never passed.
 - To post comments, the allowlist must include `gh api`, and that command can call any GitHub endpoint
-  the token allows. Give the claude subprocess its own **fine-grained token** through `GH_TOKEN` in
-  `[claude.env]`. Limit the token to the watched repos, with only *Pull requests: read and write* and
-  *Contents: read*. A hijacked review can then do no more than post PR comments. rocket-critic uses your
-  normal `gh` login for its own polling and cloning.
+  the token allows. Give `/code-review` its own limited identity: a [GitHub App](#github-app)
+  (recommended; its tokens last an hour and cover only the repo being reviewed) or a
+  [fine-grained token](#review-token) limited to the watched repos, with only *Pull requests: read and
+  write* and *Contents: read*. A hijacked review can then do no more than post PR comments.
+  rocket-critic uses your normal `gh` login for its own polling and cloning.
 
-#### Setting up the review token
+If `/code-review` needs a tool that is not on the allowlist, the call is denied and logged as a warning
+that names the tool. Add the tool to `allowed_tools` if you trust it.
+
+## Posting identity: token or GitHub App
+
+`/code-review --comment` posts as whichever GitHub identity the Claude subprocess has. rocket-critic itself
+always uses your `gh` login to list PRs and clone; only the review posting changes.
+
+| Option | Reviews appear as | Setup |
+| --- | --- | --- |
+| Nothing configured | you (your `gh` login) | none |
+| Token in `[claude.env]` | the account that owns the token | [Review token](#review-token) |
+| `[github_app]` | `<app-name>[bot]` | [GitHub App](#github-app) (recommended) |
+
+If both a token and an app are configured, a `GH_TOKEN` that resolves in `[claude.env]` wins. `doctor`
+prints which one is used and who reviews will post as.
+
+### Review token
 
 The sample config reads the token from an environment variable:
 
@@ -249,40 +270,120 @@ Reviews post under the account that owns the token. A token you create on your o
 you; to post under another name, create the token on a separate GitHub account (a "machine user") that has
 access to the repos. `doctor` points this out when the token's account is the same as your `gh` login.
 
-#### Posting as a GitHub App
+### GitHub App
 
-A GitHub App gives the reviews their own name (`<app-slug>[bot]`) without a second user account, and its
-tokens are short-lived and limited to one repo.
+A GitHub App gives the reviews their own name (`<app-name>[bot]`) without a second user account. Its tokens
+last an hour and are limited to the one repo being reviewed. Setup has three parts, all in GitHub's web UI:
+create the app, download its private key, and install it on your repos.
 
-1. **Settings → Developer settings → GitHub Apps → New GitHub App** (or the organization's settings).
-   Name it (e.g. `rocket-critic`), give any homepage URL, and untick **Webhook → Active**.
-   Repository permissions: **Pull requests: Read and write**, **Contents: Read-only** (Metadata: Read-only
-   is added automatically). Create it.
-2. Note the **App ID**, then **Generate a private key** and save the `.pem` (e.g.
-   `~/.config/rocket-critic/rocket-critic.pem`, `chmod 600`).
-3. **Install App** on the account that owns the repos and select them.
-4. Add to the config:
+#### 1. Create the app
 
-   ```toml
-   [github_app]
-   app_id = 123456
-   private_key = "~/.config/rocket-critic/rocket-critic.pem"
+1. On github.com: your profile picture → **Settings** → **Developer settings** (bottom of the left sidebar)
+   → **GitHub Apps** → **New GitHub App**. For an organization, use the organization's **Settings →
+   Developer settings** instead, so the org owns the app.
+2. Fill in:
+   - **GitHub App name**: e.g. `rocket-critic`. Reviews will appear as `rocket-critic[bot]`; names are
+     unique across GitHub, so you may need a variant.
+   - **Homepage URL**: anything, e.g. this repo's URL.
+   - **Webhook**: untick **Active**. rocket-critic polls, so it needs no webhook.
+   - **Repository permissions**: **Pull requests: Read and write** and **Contents: Read-only**.
+     **Metadata: Read-only** is added automatically. Leave everything else at **No access**.
+   - **Where can this GitHub App be installed?**: **Only on this account**.
+3. Click **Create GitHub App**. The page that opens shows the **App ID** (and Client ID) near the top.
+
+#### 2. Download the private key
+
+1. On the app's **General** page, scroll to **Private keys** and click **Generate a private key**.
+2. Your browser downloads a file named like `rocket-critic.2026-10-13.private-key.pem`. GitHub shows nothing
+   to copy, and the key can't be downloaded again later (see [Private keys](#private-keys)).
+3. Put it on the machine that runs rocket-critic, as a file. Don't copy and paste its text:
+
+   ```sh
+   mkdir -p ~/.config/rocket-critic
+   # browser on the same machine:
+   mv ~/Downloads/*.private-key.pem ~/.config/rocket-critic/rocket-critic.pem
+   # or browser on another computer (run this there):
+   scp ~/Downloads/*.private-key.pem you@server:~/.config/rocket-critic/rocket-critic.pem
    ```
 
-5. Run `rocket-critic doctor`. It checks the key, finds the installation for each repo, issues a test
-   token and shows `/code-review will post as: rocket-critic[bot]`.
+4. Restrict it and check it:
 
-For each review, rocket-critic signs a JWT with the key (using the `openssl` command) and gets a new
-installation token, limited to that repo, which it passes to `/code-review` as `GH_TOKEN`. Tokens last an
-hour, so keep `claude.timeout` under about 55 minutes. A `GH_TOKEN` that resolves in `[claude.env]` takes
-precedence over the app. rocket-critic still uses your `gh` login to list PRs and clone. Set
-`installation_id` only to skip the per-repo lookup; `api_url` points at GitHub Enterprise Server.
+   ```sh
+   chmod 600 ~/.config/rocket-critic/rocket-critic.pem
+   openssl rsa -in ~/.config/rocket-critic/rocket-critic.pem -check -noout   # prints: RSA key ok
+   ```
 
-GitHub doesn't let you request a review from an app, so use a `labels` trigger (or a person or team in
-`reviewers`) to choose which PRs it reviews.
+#### 3. Install the app on your repos
 
-If `/code-review` needs a tool that is not on the allowlist, the call is denied and logged as a warning
-that names the tool. Add the tool to `allowed_tools` if you trust it.
+1. In the app's settings, click **Install App** in the left sidebar.
+2. Click **Install** next to the account that owns the repos (or **Configure** if it's already installed).
+3. Choose **Only select repositories**, pick the repos rocket-critic should review, and click **Install**
+   (or **Save**).
+
+To review another repo later, add it in the same place (**Install App → Configure → Repository access**)
+and to the config with `rocket-critic add-repo OWNER/REPO`.
+
+#### 4. Configure and check
+
+Add to the config:
+
+```toml
+[github_app]
+app_id = 123456                                        # the App ID from step 1
+private_key = "~/.config/rocket-critic/rocket-critic.pem"
+# installation_id = 12345678    # optional: skip the per-repo lookup
+# api_url = "https://github.example.com/api/v3"        # GitHub Enterprise Server only
+```
+
+A relative `private_key` path is relative to the config file's directory. Then run `rocket-critic doctor`:
+
+```
+[ok  ] openssl on PATH (signs GitHub App tokens): /usr/bin/openssl
+[ok  ] GitHub App 123456: rocket-critic[bot], key /home/you/.config/rocket-critic/rocket-critic.pem
+[ok  ] GitHub App on you/your-repo: installation 12345678, token issued
+[ok  ] GitHub token for /code-review: GitHub App 123456 (a new token, limited to the repo, for each review)
+[ok  ] /code-review will post as: rocket-critic[bot]
+```
+
+#### How it works and what to know
+
+- For each review, rocket-critic signs a short-lived JWT with the private key (using the `openssl` command),
+  exchanges it for an installation token limited to that repo, and passes the token to `/code-review` as
+  `GH_TOKEN`. It never prints or copies the key.
+- Tokens last an hour, so keep `claude.timeout` under about 55 minutes (the default is 45).
+- GitHub doesn't let you request a review from an app, so a `reviewers` trigger can't name
+  `rocket-critic[bot]`. Use a `labels` trigger (e.g. `add-repo OWNER/REPO --label ai-review`), or a person
+  or team in `reviewers` whose review requests should mean "run rocket-critic".
+- If the sample config's `GH_TOKEN = "${ROCKET_CRITIC_GH_TOKEN}"` is still present with the variable unset,
+  it is simply skipped and the app is used; no warning is shown.
+
+### Private keys
+
+- **GitHub keeps no copy.** It stores only the public half. The `.pem` exists only where your browser saved
+  it, and **Generate a private key** creates a new key each time rather than re-downloading an old one.
+- **Keep it private.** `chmod 600`, never commit it, never paste it into chats or issues. If you keep a
+  backup, use a password manager or an encrypted disk.
+- **Lost or broken key:** click **Generate a private key** again, point `private_key` at the new file, run
+  `doctor`, then delete the old key under **Private keys**. The app, its installation and rocket-critic's
+  review history are unaffected.
+- **Rotation without downtime:** an app can have several valid keys at once. Generate the new key, switch the
+  config, check with `doctor`, then delete the old key.
+- **Leaked key:** delete it under **Private keys** right away. Its tokens stop working within the hour, and
+  until then they can only do what the app's permissions allow, on the repos it's installed on.
+
+#### Troubleshooting
+
+| `doctor` says | Meaning | Fix |
+| --- | --- | --- |
+| `private key not found` | Wrong path in `private_key` | Fix the path (relative paths start from the config file's directory) |
+| `is empty` / `is truncated (no -----END line)` | Incomplete file | Download a new key (step 2) |
+| `is not a PEM file` | Not a key: e.g. a saved web page or the App ID | Use the downloaded `*.private-key.pem` |
+| `holds '-----BEGIN PUBLIC KEY-----'` (or another type) | A public key or certificate | Use the private key |
+| `is password-protected` | Encrypted key | Use GitHub's unencrypted download |
+| `not a valid private key` / openssl `Could not find private key` | Damaged, usually by copy and paste | Copy the file itself (`scp`), or download a new key |
+| `GitHub App 123456: ... HTTP 401` | Key and `app_id` don't belong together, or the key was deleted on GitHub | Check the App ID, or generate a new key |
+| `not installed on OWNER/REPO` | The installation doesn't include that repo | **Install App → Configure** and add the repo (step 3) |
+| `repo owner/repo: this is the sample placeholder` | Config still has the template entry | `rocket-critic add-repo OWNER/REPO` |
 
 ## Development
 
