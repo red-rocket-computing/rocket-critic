@@ -30,7 +30,8 @@ def test_build_command():
     assert cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
     allowed = cmd[cmd.index("--allowedTools") + 1].split(",")
     assert "Bash(gh api:*)" in allowed and "Edit" not in allowed
-    assert "Edit" in cmd[cmd.index("--disallowedTools") + 1].split(",")
+    assert "Edit" not in cmd[cmd.index("--disallowedTools") + 1].split(",")
+    assert "--add-dir" not in cmd  # no scratch directory: no writes at all
     assert cmd[-2:] == ["--effort", "high"]
 
 
@@ -111,3 +112,24 @@ def test_command_error_reports_first_line():
 
     err = CommandError(["gh", "api"], 1, "", "unknown flag: --slurp\n\nUsage:  gh api\n  --verbose  x\n")
     assert str(err).endswith(": unknown flag: --slurp")
+
+
+def test_build_command_with_scratch(tmp_path):
+    from rocket_critic.config import parse as parse_cfg
+
+    c = parse_cfg({"claude": {"disallowed_tools": ["Edit", "Write", "WebFetch"]}}).claude
+    cmd = build_command("p", c, scratch=tmp_path)
+    allowed = cmd[cmd.index("--allowedTools") + 1].split(",")
+    assert f"Edit(/{tmp_path.resolve()}/**)" in allowed and f"Edit(//{str(tmp_path.resolve())[1:]}/**)" in allowed
+    assert cmd[cmd.index("--disallowedTools") + 1] == "WebFetch"  # a bare deny would override the scoped allow
+    assert cmd[cmd.index("--add-dir") + 1] == str(tmp_path.resolve())
+
+
+def test_review_prompt_posting_notes(tmp_path):
+    s = cfg()
+    text = review_prompt(5, s.review, scratch=tmp_path, context="CTX")
+    first, *rest = text.split("\n\n")
+    assert first == "/code-review 5 medium --comment"
+    assert "without `git -C`" in text and f"{tmp_path}/comment-1.json" in text and "--input <file>" in text
+    assert text.endswith("CTX")
+    assert "Bash(echo:*)" in s.claude.allowed_tools and "Bash(git remote -v)" in s.claude.allowed_tools

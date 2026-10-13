@@ -35,10 +35,26 @@ class ReviewResult:
 MAX_THREADS_CHARS = 20_000
 
 
-def review_prompt(number: int, review: ReviewConfig, *, comment: bool | None = None, context: str = "") -> str:
+def posting_notes(scratch: Path) -> str:
+    """How to run commands and post to GitHub within rocket-critic's permissions."""
+    return "\n".join([
+        "## Working notes (from rocket-critic)",
+        "",
+        "- The current directory is the pull request checkout: run git here, without `git -C`.",
+        "- Shell heredocs and quoted strings containing backticks or `$(...)` are blocked, and review",
+        "  comments usually contain backticks. To send a JSON body to the GitHub API, write it with the",
+        f"  Write tool to a new file in {scratch}/ (e.g. {scratch}/comment-1.json) and pass that file:",
+        "  `gh api --method POST repos/OWNER/REPO/pulls/N/comments --input <file>`",
+        "  (or `.../pulls/N/reviews --input <file>` for a review with several comments).",
+        f"- You can only write files inside {scratch}/.",
+    ])
+
+
+def review_prompt(number: int, review: ReviewConfig, *, comment: bool | None = None, context: str = "",
+                  scratch: Path | None = None) -> str:
     """The ``/code-review`` command line.
 
-    Re-review context goes after the arguments: /code-review reads its
+    Notes and re-review context go after the arguments: /code-review reads its
     arguments as free text and follows it there, while it ignores
     ``--append-system-prompt``.
     """
@@ -48,8 +64,12 @@ def review_prompt(number: int, review: ReviewConfig, *, comment: bool | None = N
         parts += ["--max-findings", review.max_findings]
     if comment:
         parts.append("--comment")
-    prompt = " ".join(parts)
-    return f"{prompt}\n\n{context}" if context else prompt
+    sections = [" ".join(parts)]
+    if scratch is not None:
+        sections.append(posting_notes(scratch))
+    if context:
+        sections.append(context)
+    return "\n\n".join(sections)
 
 
 def rereview_context(last_sha: str, mode: str, threads: list[Thread]) -> str:
@@ -100,7 +120,21 @@ def _one_line(text: str, limit: int = 600) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-def build_command(prompt: str, claude: ClaudeConfig) -> list[str]:
+def scratch_rule(scratch: Path) -> str:
+    """Permission rule allowing file writes (Edit/Write) only under ``scratch``."""
+    # "//" marks an absolute path in Claude Code permission rules.
+    return f"Edit(/{scratch.resolve()}/**)"
+
+
+def build_command(prompt: str, claude: ClaudeConfig, scratch: Path | None = None) -> list[str]:
+    """The claude command line. With ``scratch``, writes are allowed in that directory only."""
+    allowed = list(claude.allowed_tools)
+    disallowed = list(claude.disallowed_tools)
+    if scratch is not None:
+        allowed.append(scratch_rule(scratch))
+        # A bare Edit/Write deny would override the scoped allow; dontAsk refuses
+        # all other writes anyway.
+        disallowed = [t for t in disallowed if t not in ("Edit", "Write")]
     cmd = [claude.binary, "-p", prompt, "--output-format", "json", "--no-session-persistence"]
     if claude.model:
         cmd += ["--model", claude.model]
@@ -109,10 +143,12 @@ def build_command(prompt: str, claude: ClaudeConfig) -> list[str]:
     # Project/local settings and MCP config come from the PR under review and
     # are untrusted, so only the user's own settings are honoured.
     cmd += ["--setting-sources", "user", "--strict-mcp-config"]
-    if claude.allowed_tools:
-        cmd += ["--allowedTools", ",".join(claude.allowed_tools)]
-    if claude.disallowed_tools:
-        cmd += ["--disallowedTools", ",".join(claude.disallowed_tools)]
+    if allowed:
+        cmd += ["--allowedTools", ",".join(allowed)]
+    if disallowed:
+        cmd += ["--disallowedTools", ",".join(disallowed)]
+    if scratch is not None:
+        cmd += ["--add-dir", str(scratch.resolve())]
     cmd += claude.extra_args
     return cmd
 
@@ -176,9 +212,10 @@ def run_review(
     comment: bool | None = None,
     context: str = "",
     extra_env: Mapping[str, str] | None = None,
+    scratch: Path | None = None,
 ) -> ReviewResult:
-    prompt = review_prompt(number, review, comment=comment, context=context)
-    cmd = build_command(prompt, claude)
+    prompt = review_prompt(number, review, comment=comment, context=context, scratch=scratch)
+    cmd = build_command(prompt, claude, scratch)
     env = build_env(claude, repo, extra=extra_env)
     log.info("%s#%d: running `%s`%s (model=%s)", repo, number, prompt.split("\n", 1)[0],
              " with re-review context" if context else "", claude.model or "default")

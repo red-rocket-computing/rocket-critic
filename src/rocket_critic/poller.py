@@ -6,6 +6,7 @@ import fcntl
 import json
 import logging
 import os
+import shutil
 import signal
 import threading
 import time
@@ -107,15 +108,19 @@ class Critic:
         incremental = repo.review.incremental if incremental is None else incremental
         last = self.state.last_done(pr.repo, pr.number) if incremental else None
         self.state.start(pr.repo, pr.number, pr.head_sha)
-        worktree = None
+        worktree = scratch = None
         out_dir = self.settings.workdir / "runs" / pr.repo / str(pr.number)
         try:
             worktree = self.ws.checkout(pr.repo, pr.number, pr.head_sha, pr.base_ref)
             context = self.rereview_context(pr, repo, last.head_sha) if last else ""
             extra_env = self.app_env(repo)
+            # The only place claude may write: payload files for gh api --input.
+            scratch = out_dir / f"scratch-{pr.head_sha[:12]}"
+            shutil.rmtree(scratch, ignore_errors=True)
+            scratch.mkdir(parents=True)
             self.state.set_phase(pr.repo, pr.number, pr.head_sha, PHASE_REVIEW)
             result = run_review(worktree, pr.repo, pr.number, repo.claude, repo.review, comment=comment,
-                                context=context, extra_env=extra_env)
+                                context=context, extra_env=extra_env, scratch=scratch)
         except (ReviewError, proc.CommandError) as exc:
             self.state.finish(pr.repo, pr.number, pr.head_sha, FAILED, error=str(exc))
             log.error("%s: review failed: %s", pr.ref, exc)
@@ -129,6 +134,8 @@ class Critic:
                     self.ws.remove(pr.repo, worktree)
                 except proc.CommandError as exc:
                     log.warning("%s: could not remove worktree %s: %s", pr.ref, worktree, exc)
+            if scratch is not None and not repo.review.keep_worktrees:
+                shutil.rmtree(scratch, ignore_errors=True)
 
         out_dir.mkdir(parents=True, exist_ok=True)
         output_path = out_dir / f"{pr.head_sha[:12]}.md"

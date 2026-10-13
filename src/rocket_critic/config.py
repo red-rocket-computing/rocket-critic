@@ -51,9 +51,13 @@ DEFAULT_ALLOWED_TOOLS = [
     "Bash(git merge-base:*)",
     "Bash(git rev-parse:*)",
     "Bash(git ls-files:*)",
+    "Bash(git remote -v)",
+    "Bash(echo:*)",
 ]
 
-DEFAULT_DISALLOWED_TOOLS = ["Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch"]
+# Edit/Write are allowed only inside each review's scratch directory (added per run);
+# with permission_mode = "dontAsk" every other write is refused.
+DEFAULT_DISALLOWED_TOOLS = ["NotebookEdit", "WebFetch", "WebSearch"]
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")

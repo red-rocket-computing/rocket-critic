@@ -375,7 +375,9 @@ injection. rocket-critic limits what such a PR can do:
   MCP servers from its own `.claude/` directory or `.mcp.json`.
 - Claude runs with `--permission-mode dontAsk` and an allowlist (`claude.allowed_tools`). The allowlist
   covers read-only file tools, read-only `git` commands, and the `gh` commands `/code-review` needs.
-  `Edit`, `Write`, `WebFetch` and `WebSearch` are disallowed, and `--fix` is never passed.
+  `WebFetch` and `WebSearch` are disallowed, and `--fix` is never passed. Claude can write files only in
+  a per-review scratch directory (`WORKDIR/runs/OWNER/REPO/N/scratch-SHA/`, deleted afterwards), never in
+  the checkout.
 - To post comments, the allowlist must include `gh api`, and that command can call any GitHub endpoint
   the token allows. Give `/code-review` its own limited identity: a [GitHub App](#github-app)
   (recommended; its tokens last an hour and cover only the repo being reviewed) or a
@@ -385,6 +387,20 @@ injection. rocket-critic limits what such a PR can do:
 
 If `/code-review` needs a tool that is not on the allowlist, the call is denied and logged as a warning
 that names the tool. Add the tool to `allowed_tools` if you trust it.
+
+**Why comments are posted from files.** In `dontAsk` mode, Claude Code refuses shell commands it can't
+check statically, whatever the allowlist says. That includes heredocs and quoted strings containing
+backticks or `$(...)`, and review comments almost always contain backticks. So rocket-critic gives each
+review a scratch directory and tells `/code-review` (in its arguments) to write each JSON payload there
+with the Write tool and send it with `gh api ... --input <file>`. It also tells it to run `git` in the
+checkout without `-C`. If the log shows denials like `Bash(gh api ... <<'PAYLOAD' ...)`, the model ignored
+that note. The comment wasn't posted, so re-run the review with `review OWNER/REPO#N --force`; a more
+capable model follows the note more reliably.
+
+If you set `allowed_tools` or `disallowed_tools` yourself, they replace the defaults. Keep
+`Bash(gh api:*)`, and add `Bash(echo:*)` and `Bash(git remote -v)` to match the current defaults. A bare
+`Edit`/`Write` in `disallowed_tools` is dropped automatically: it would override the scratch-directory
+rule, and `dontAsk` refuses every other write anyway.
 
 ## Posting identity: token or GitHub App
 

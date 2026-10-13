@@ -165,7 +165,13 @@ def test_review_one_pr(env):
     assert "posted 1 inline comment" in res.output
 
     (call,) = env.calls()
-    assert call["argv"][:2] == ["-p", "/code-review 1 medium --comment"]
+    assert call["argv"][0] == "-p" and call["argv"][1].splitlines()[0] == "/code-review 1 medium --comment"
+    # claude may write only to this review's scratch directory, which is cleaned up afterwards
+    scratch = Path(call["argv"][call["argv"].index("--add-dir") + 1])
+    assert scratch.parent == env.workdir / "runs" / "o" / "r" / "1" and scratch.name.startswith("scratch-")
+    assert f"Edit(/{scratch}/**)" in call["argv"][call["argv"].index("--allowedTools") + 1].split(",")
+    assert f"Write tool to a new file in {scratch}/" in call["argv"][1]
+    assert not scratch.exists()
     assert call["head"] == env.pr_sha
     assert Path(call["cwd"]).is_relative_to(env.workdir / "prs" / "o" / "r")
     assert call["env"]["ANTHROPIC_BASE_URL"] == "http://localhost:11434"
@@ -186,12 +192,13 @@ def test_review_one_pr(env):
     assert prompt.splitlines()[0] == "/code-review 1 high"
     assert "already reviewed; it is being reviewed again in full" in prompt
     res = env.run("review", "o/r#1", "--force", "--full")
-    assert env.calls()[-1]["argv"][1] == "/code-review 1 medium --comment"
+    prompt = env.calls()[-1]["argv"][1]
+    assert prompt.splitlines()[0] == "/code-review 1 medium --comment" and "Re-review context" not in prompt
 
 
 def test_watch_reviews_new_heads_once(env):
     assert env.run("watch", "--once").exit_code == 0
-    assert [c["argv"][1] for c in env.calls()] == ["/code-review 1 medium --comment"]  # draft #2 skipped
+    assert [c["argv"][1].splitlines()[0] for c in env.calls()] == ["/code-review 1 medium --comment"]  # draft #2 skipped
 
     assert env.run("watch", "--once").exit_code == 0
     assert len(env.calls()) == 1
