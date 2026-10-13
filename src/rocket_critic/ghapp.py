@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from .config import GitHubAppConfig
@@ -39,8 +40,36 @@ def sign_rs256(message: bytes, key_path: str, openssl: str = "openssl") -> bytes
         raise GitHubAppError("the openssl command is needed to sign GitHub App tokens but was not found") from None
     if res.returncode != 0:
         detail = res.stderr.decode(errors="replace").strip().splitlines()
-        raise GitHubAppError(f"could not sign with {key_path}: {detail[0] if detail else 'openssl failed'}")
+        raise GitHubAppError(f"could not sign with {key_path}: {detail[0] if detail else 'openssl failed'} "
+                             f"(the file is not a valid private key; {KEY_HINT})")
     return res.stdout
+
+
+KEY_HINT = "use the .pem file that 'Generate a private key' on the app's settings page downloads"
+
+
+def check_key(path: Path) -> None:
+    """Raise with a specific reason if ``path`` is clearly not a usable PEM private key.
+
+    Only PEM header lines are ever quoted, never key material.
+    """
+    if not path.is_file():
+        raise GitHubAppError(f"GitHub App private key not found: {path}")
+    try:
+        text = path.read_text(errors="replace")
+    except OSError as exc:
+        raise GitHubAppError(f"cannot read GitHub App private key {path}: {exc.strerror}") from None
+    if not text.strip():
+        raise GitHubAppError(f"GitHub App private key {path} is empty; {KEY_HINT}")
+    headers = [line.strip() for line in text.splitlines() if line.strip().startswith("-----BEGIN ")]
+    if not headers:
+        raise GitHubAppError(f"{path} is not a PEM file (no -----BEGIN line); {KEY_HINT}")
+    if not any("PRIVATE KEY" in h for h in headers):
+        raise GitHubAppError(f"{path} holds '{headers[0]}', not a private key; {KEY_HINT}")
+    if "ENCRYPTED" in text:
+        raise GitHubAppError(f"{path} is password-protected; {KEY_HINT}")
+    if "-----END " not in text:
+        raise GitHubAppError(f"{path} is truncated (no -----END line); {KEY_HINT}")
 
 
 class GitHubApp:
@@ -59,8 +88,7 @@ class GitHubApp:
 
     def jwt(self) -> str:
         """An app JWT, valid for about nine minutes (GitHub allows at most ten)."""
-        if not self.cfg.private_key.is_file():
-            raise GitHubAppError(f"GitHub App private key not found: {self.cfg.private_key}")
+        check_key(self.cfg.private_key)
         now = int(self._clock())
         header = _b64url(json.dumps({"alg": "RS256", "typ": "JWT"}, separators=(",", ":")).encode())
         # iat is backdated to allow for clock drift between here and GitHub.

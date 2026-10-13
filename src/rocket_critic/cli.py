@@ -19,6 +19,7 @@ from .config import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_WORKDIR,
     LEVELS,
+    PLACEHOLDER_REPO,
     ClaudeConfig,
     ConfigError,
     Settings,
@@ -238,7 +239,7 @@ def doctor(ctx: Ctx) -> None:
         mark = click.style("ok  ", fg="green") if good else click.style("FAIL", fg="red")
         click.echo(f"[{mark}] {label}" + (f": {detail}" if detail else ""))
 
-    click.echo(f"config: {s.path}\nworkdir: {s.workdir}\nrepos: {', '.join(r.name for r in s.repos) or '(none)'}")
+    click.echo(f"config: {s.path.resolve()}\nworkdir: {s.workdir}\nrepos: {', '.join(r.name for r in s.repos) or '(none)'}")
     for tool in ("git", "gh"):
         report(shutil.which(tool) is not None, f"{tool} on PATH", shutil.which(tool) or "not found")
 
@@ -247,7 +248,11 @@ def doctor(ctx: Ctx) -> None:
     authed, status = gh.auth_status()
     report(authed, "gh auth status", " ".join(status.split())[:160])
 
-    for repo in s.repos:
+    real_repos = [r for r in s.repos if r.name != PLACEHOLDER_REPO]
+    if len(real_repos) < len(s.repos):
+        report(False, f"repo {PLACEHOLDER_REPO}",
+               "this is the sample placeholder; replace it with `rocket-critic add-repo OWNER/REPO`")
+    for repo in real_repos:
         try:
             prs = gh.list_open_prs(repo.name)
             report(True, f"list PRs in {repo.name}", f"{len(prs)} open")
@@ -265,7 +270,7 @@ def doctor(ctx: Ctx) -> None:
         except GitHubAppError as exc:
             report(False, f"GitHub App {s.github_app.app_id}", str(exc))
         if app_login:
-            for repo in s.repos:
+            for repo in real_repos:
                 try:
                     installation = app.installation_id(repo.name)
                     app.token(repo.name)

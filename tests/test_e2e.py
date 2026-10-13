@@ -592,6 +592,15 @@ def test_doctor_with_github_app(env, app_api, monkeypatch):
     assert "[FAIL]" in doctor_line(out, "GitHub App 123456") and "HTTP 401" in out
 
 
+def test_doctor_flags_placeholder_repo(env, tmp_path):
+    wd = tmp_path / "wd"
+    CliRunner().invoke(cli, ["-w", str(wd), "init"], catch_exceptions=False)
+    out = CliRunner().invoke(cli, ["-w", str(wd), "doctor"], catch_exceptions=False).output
+    assert "sample placeholder" in doctor_line(out, "repo owner/repo") and "add-repo" in out
+    assert "list PRs in owner/repo" not in out
+    assert f"config: {wd.resolve() / 'config.toml'}" in out
+
+
 def test_clean_and_init(env, tmp_path):
     cfg = tmp_path / "new" / "config.toml"
     res = CliRunner().invoke(cli, ["-c", str(cfg), "init"])
