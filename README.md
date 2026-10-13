@@ -575,6 +575,10 @@ python -m venv .venv && .venv/bin/pip install -e '.[dev]'
 The end-to-end tests use a local git remote, plus fake `gh` and `claude` scripts in `tests/fakes/`.
 They need no network access and no credentials.
 
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every pull request and push to `main`. It runs
+the tests on Python 3.11–3.13, `pyflakes` (also in the `dev` extras: `python -m pyflakes src tests`), and a
+check that the wheel builds, installs and runs.
+
 ### Releasing
 
 Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) when a version tag is
@@ -591,7 +595,7 @@ pushed. The version is defined once, as `__version__` in `src/rocket_critic/__in
 The workflow then:
 - checks that the tag matches `__version__` (`v0.2.0` for `0.2.0`; `v0.2.0-rc1` or `v0.2.0rc1` for
   `0.2.0rc1`);
-- runs the tests on Python 3.11, 3.12 and 3.13;
+- runs the [CI workflow](.github/workflows/ci.yml): tests on Python 3.11–3.13, lint, wheel check;
 - builds the wheel and source archive and checks that the wheel installs and runs;
 - creates a GitHub release with generated notes, the two files and `SHA256SUMS`. Tags with a suffix become
   pre-releases.

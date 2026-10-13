@@ -3,7 +3,8 @@
 #   git tag -a v0.2.0 -m "rocket-critic 0.2.0" && git push origin v0.2.0
 #
 # The tag must equal "v" + __version__ in src/rocket_critic/__init__.py. Tags with
-# a suffix (v0.2.0-rc1) become pre-releases. Running the workflow by hand
+# a suffix (v0.2.0-rc1) become pre-releases. The checks are the CI workflow's
+# (tests on Python 3.11-3.13, lint, wheel smoke test). Running the workflow by hand
 # (Actions → Release → Run workflow) checks, tests and builds without publishing.
 name: Release
 
@@ -46,33 +47,14 @@ jobs:
             exit 1
           fi
 
-  test:
-    name: Test (Python ${{ matrix.python }})
+  ci:
+    name: CI
     needs: check-version
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: true
-      matrix:
-        python: ["3.11", "3.12", "3.13"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - name: Install
-        run: python -m pip install -e '.[dev]'
-      - name: Configure git for the tests
-        run: |
-          git config --global user.email "ci@example.invalid"
-          git config --global user.name "CI"
-      - name: Run tests
-        run: python -m pytest -q
+    uses: ./.github/workflows/ci.yml
 
   build:
     name: Build distributions
-    needs: test
+    needs: ci
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
