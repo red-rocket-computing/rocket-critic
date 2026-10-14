@@ -1,20 +1,29 @@
-# Release rocket-critic: push a tag matching the package version, e.g.
+# Release rocket-critic. The version is defined once, as __version__ in
+# src/rocket_critic/__init__.py; the tag is "v" + that version.
 #
-#   git tag -a v0.2.0 -m "rocket-critic 0.2.0" && git push origin v0.2.0
+# Two ways to start a release:
 #
-# The tag must equal "v" + __version__ in src/rocket_critic/__init__.py. Tags with
-# a suffix (v0.2.0-rc1) become pre-releases. The checks are the CI workflow's
-# (tests on Python 3.11-3.13, lint, wheel smoke test).
+#   - Run the workflow by hand (Actions → Release → Run workflow, or
+#     `gh workflow run release.yml --ref main -f tag=v0.2.0`) with "tag" set to
+#     a tag that doesn't exist yet. After the checks pass, the workflow creates
+#     the tag on the selected commit and publishes the release. New tags are
+#     only created from the default branch. Nothing has to be pushed except
+#     the version bump, so this also works where tags can't be pushed.
+#   - Push a tag yourself:
+#       git tag -a v0.2.0 -m "rocket-critic 0.2.0" && git push origin v0.2.0
+#
+# Either way the tag must match __version__ (v0.2.0 for 0.2.0; v0.2.0-rc1 or
+# v0.2.0rc1 for 0.2.0rc1, which become pre-releases), and the CI workflow's
+# checks (tests on Python 3.11-3.13, lint, wheel smoke test) run first.
+#
+# Running by hand with "tag" set to an existing tag checks out that tag, tests,
+# builds and publishes it (use this to add the files to a release that has
+# none). With "tag" empty, it checks, tests and builds the selected branch
+# without publishing anything.
 #
 # If a release for the tag already exists (e.g. it was created on GitHub's
-# "Draft a new release" page, which also creates the tag), the built files are
-# attached to it and its title and notes are kept.
-#
-# Running the workflow by hand (Actions → Release → Run workflow):
-#   - with "tag" set to an existing tag: check out that tag, test, build and
-#     publish it (use this to add the files to a release that has none);
-#   - with "tag" empty: check, test and build the selected branch without
-#     publishing anything.
+# "Draft a new release" page), the built files are attached to it and its title
+# and notes are kept.
 name: Release
 
 on:
@@ -23,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to publish, e.g. v0.1.0 (empty: check, test and build only)"
+        description: "Tag to publish, e.g. v0.2.0; created on this commit if it doesn't exist (empty: check, test and build only)"
         required: false
         default: ""
 
@@ -43,12 +52,18 @@ jobs:
       tag: ${{ steps.target.outputs.tag }}
       ref: ${{ steps.target.outputs.ref }}
       publish: ${{ steps.target.outputs.publish }}
+      create_tag: ${{ steps.target.outputs.create_tag }}
+      sha: ${{ steps.target.outputs.sha }}
     steps:
       - id: target
         name: Work out what to build
         env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           INPUT_TAG: ${{ inputs.tag }}
           SHA: ${{ github.sha }}
         run: |
@@ -57,15 +72,32 @@ jobs:
           else
             tag="$INPUT_TAG"
           fi
-          if [ -n "$tag" ]; then
-            echo "tag=$tag" >> "$GITHUB_OUTPUT"
-            echo "ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-            echo "Building and publishing tag $tag"
-          else
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          if [ -z "$tag" ]; then
             echo "ref=$SHA" >> "$GITHUB_OUTPUT"
             echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "create_tag=false" >> "$GITHUB_OUTPUT"
             echo "No tag: checking, testing and building $SHA without publishing"
+            exit 0
+          fi
+          if ! [[ "$tag" =~ ^v[0-9][0-9A-Za-z.+-]*$ ]]; then
+            echo "::error::Tag $tag must look like v1.2.3 or v1.2.3-rc1"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          if gh api "repos/$GH_REPO/git/ref/tags/$tag" --silent 2>/dev/null; then
+            echo "ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"
+            echo "create_tag=false" >> "$GITHUB_OUTPUT"
+            echo "Building and publishing tag $tag"
+          else
+            if [ "$REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+              echo "::error::Tag $tag doesn't exist; new tags are only created from $DEFAULT_BRANCH (this run is on $REF)"
+              exit 1
+            fi
+            echo "ref=$SHA" >> "$GITHUB_OUTPUT"
+            echo "create_tag=true" >> "$GITHUB_OUTPUT"
+            echo "Tag $tag doesn't exist: building $SHA, then tagging it $tag and publishing"
           fi
       - uses: actions/checkout@v4
         with:
@@ -138,15 +170,23 @@ jobs:
         with:
           name: dist
           path: dist
-      - name: Create the release, or add the files to an existing one
+      - name: Create the tag if needed, then the release (or add the files to an existing one)
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.check-version.outputs.tag }}
           VERSION: ${{ needs.check-version.outputs.version }}
+          CREATE_TAG: ${{ needs.check-version.outputs.create_tag }}
+          SHA: ${{ needs.check-version.outputs.sha }}
         run: |
           prerelease=false
           case "$TAG" in *-*|*a[0-9]*|*b[0-9]*|*rc[0-9]*) prerelease=true ;; esac
+
+          if [ "$CREATE_TAG" = true ]; then
+            # Fails if the tag appeared since the check, rather than moving it.
+            gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" --silent
+            echo "Created tag $TAG on $SHA"
+          fi
 
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
             echo "Release $TAG already exists; attaching the files and keeping its title and notes."
