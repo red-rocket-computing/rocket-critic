@@ -581,30 +581,42 @@ check that the wheel builds, installs and runs.
 
 ### Releasing
 
-Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) when a version tag is
-pushed. The version is defined once, as `__version__` in `src/rocket_critic/__init__.py`.
+Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml). The version is
+defined once, as `__version__` in `src/rocket_critic/__init__.py`, and the release tag is `v` + that version.
 
 1. Set `__version__` (e.g. `"0.2.0"`, or `"0.2.0rc1"` for a release candidate) and merge that to `main`.
-2. Tag the merge commit and push the tag:
+2. Start the release, in either of these ways:
+   - **Run the workflow** (**Actions → Release → Run workflow** on `main`, with **tag** `v0.2.0`), or from
+     the command line:
 
-   ```sh
-   git tag -a v0.2.0 -m "rocket-critic 0.2.0"
-   git push origin v0.2.0
-   ```
+     ```sh
+     gh workflow run release.yml --ref main -f tag=v0.2.0
+     ```
+
+     When the tag doesn't exist yet, the workflow creates it on the `main` commit it ran on, after the checks
+     pass. Nothing but the version bump has to be pushed, so this also works for tools and sessions that
+     can't push tags. New tags are only created from the default branch.
+   - **Push a tag** on the merge commit:
+
+     ```sh
+     git tag -a v0.2.0 -m "rocket-critic 0.2.0"
+     git push origin v0.2.0
+     ```
 
 The workflow then:
 - checks that the tag matches `__version__` (`v0.2.0` for `0.2.0`; `v0.2.0-rc1` or `v0.2.0rc1` for
   `0.2.0rc1`);
 - runs the [CI workflow](.github/workflows/ci.yml): tests on Python 3.11–3.13, lint, wheel check;
 - builds the wheel and source archive and checks that the wheel installs and runs;
+- creates the tag if the run was started by hand for a new one;
 - creates a GitHub release with generated notes, the two files and `SHA256SUMS`. Tags with a suffix become
   pre-releases.
 
 If a release for the tag already exists, for example because it was created on GitHub's **Draft a new
-release** page (which also creates the tag), the workflow attaches the files to it and keeps its title and
-notes. A draft stays a draft until you publish it.
+release** page, the workflow attaches the files to it and keeps its title and notes. A draft stays a draft
+until you publish it.
 
-Running the workflow by hand (**Actions → Release → Run workflow**):
+Other ways to run the workflow by hand:
 - with **tag** set to an existing tag (e.g. `v0.1.0`), it checks out that tag, tests, builds and publishes
   it. Use this to add the files to a release that has none;
 - with **tag** empty, it checks, tests and builds the selected branch without publishing anything.
