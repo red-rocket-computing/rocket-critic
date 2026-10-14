@@ -600,7 +600,14 @@ The workflow then:
 - creates a GitHub release with generated notes, the two files and `SHA256SUMS`. Tags with a suffix become
   pre-releases.
 
-Running the workflow by hand (**Actions → Release → Run workflow**) does everything except publishing.
+If a release for the tag already exists, for example because it was created on GitHub's **Draft a new
+release** page (which also creates the tag), the workflow attaches the files to it and keeps its title and
+notes. A draft stays a draft until you publish it.
+
+Running the workflow by hand (**Actions → Release → Run workflow**):
+- with **tag** set to an existing tag (e.g. `v0.1.0`), it checks out that tag, tests, builds and publishes
+  it. Use this to add the files to a release that has none;
+- with **tag** empty, it checks, tests and builds the selected branch without publishing anything.
 
 To install a release:
 
