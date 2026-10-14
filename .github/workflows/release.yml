@@ -4,20 +4,34 @@
 #
 # The tag must equal "v" + __version__ in src/rocket_critic/__init__.py. Tags with
 # a suffix (v0.2.0-rc1) become pre-releases. The checks are the CI workflow's
-# (tests on Python 3.11-3.13, lint, wheel smoke test). Running the workflow by hand
-# (Actions → Release → Run workflow) checks, tests and builds without publishing.
+# (tests on Python 3.11-3.13, lint, wheel smoke test).
+#
+# If a release for the tag already exists (e.g. it was created on GitHub's
+# "Draft a new release" page, which also creates the tag), the built files are
+# attached to it and its title and notes are kept.
+#
+# Running the workflow by hand (Actions → Release → Run workflow):
+#   - with "tag" set to an existing tag: check out that tag, test, build and
+#     publish it (use this to add the files to a release that has none);
+#   - with "tag" empty: check, test and build the selected branch without
+#     publishing anything.
 name: Release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish, e.g. v0.1.0 (empty: check, test and build only)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -26,8 +40,36 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.target.outputs.tag }}
+      ref: ${{ steps.target.outputs.ref }}
+      publish: ${{ steps.target.outputs.publish }}
     steps:
+      - id: target
+        name: Work out what to build
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            tag="$REF_NAME"
+          else
+            tag="$INPUT_TAG"
+          fi
+          if [ -n "$tag" ]; then
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            echo "ref=refs/tags/$tag" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Building and publishing tag $tag"
+          else
+            echo "ref=$SHA" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "No tag: checking, testing and building $SHA without publishing"
+          fi
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.ref }}
       - id: version
         name: Read the package version
         run: |
@@ -35,9 +77,9 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Package version: $version"
       - name: Tag must match the version
-        if: github.ref_type == 'tag'
+        if: steps.target.outputs.publish == 'true'
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.target.outputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           # Accept v1.2.3 for 1.2.3, and v1.2.3-rc1 / v1.2.3rc1 for 1.2.3rc1.
@@ -51,13 +93,17 @@ jobs:
     name: CI
     needs: check-version
     uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.check-version.outputs.ref }}
 
   build:
     name: Build distributions
-    needs: ci
+    needs: [check-version, ci]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-version.outputs.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -83,26 +129,42 @@ jobs:
   release:
     name: Publish GitHub release
     needs: [check-version, build]
-    if: github.ref_type == 'tag'
+    if: needs.check-version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist
-      - name: Create the release
+      - name: Create the release, or add the files to an existing one
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.check-version.outputs.tag }}
           VERSION: ${{ needs.check-version.outputs.version }}
         run: |
-          flags=()
-          case "$TAG" in *-*|*a[0-9]*|*b[0-9]*|*rc[0-9]*) flags+=(--prerelease) ;; esac
-          gh release create "$TAG" dist/* \
-            --title "rocket-critic $VERSION" \
-            --generate-notes \
-            --verify-tag \
-            "${flags[@]}"
+          prerelease=false
+          case "$TAG" in *-*|*a[0-9]*|*b[0-9]*|*rc[0-9]*) prerelease=true ;; esac
+
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            echo "Release $TAG already exists; attaching the files and keeping its title and notes."
+            gh release upload "$TAG" dist/* --clobber
+            if [ "$prerelease" = true ]; then
+              gh release edit "$TAG" --prerelease
+            fi
+            if [ "$draft" = true ]; then
+              echo "::notice::Release $TAG is still a draft; publish it on GitHub when ready."
+            fi
+          else
+            flags=()
+            if [ "$prerelease" = true ]; then
+              flags+=(--prerelease)
+            fi
+            gh release create "$TAG" dist/* \
+              --title "rocket-critic $VERSION" \
+              --generate-notes \
+              --verify-tag \
+              "${flags[@]}"
+          fi
