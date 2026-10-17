@@ -24,6 +24,12 @@
 # If a release for the tag already exists (e.g. it was created on GitHub's
 # "Draft a new release" page), the built files are attached to it and its title
 # and notes are kept.
+#
+# Every release also carries rocket-critic.tar.gz, a copy of the source archive
+# without the version in its name, so this link always installs the newest
+# release (GitHub's "latest" skips drafts and pre-releases):
+#   https://github.com/OWNER/REPO/releases/latest/download/rocket-critic.tar.gz
+# A wheel can't have a version-less name: pip rejects it.
 name: Release
 
 on:
@@ -150,6 +156,15 @@ jobs:
           /tmp/smoke/bin/rocket-critic --version
           /tmp/smoke/bin/rocket-critic -w /tmp/smoke/work init --repo owner/example
           grep -q 'name = "owner/example"' /tmp/smoke/work/config.toml
+      - name: Add a version-less copy of the source archive
+        # For releases/latest/download/rocket-critic.tar.gz; pip installs an
+        # archive from a URL whatever it is called.
+        run: cp dist/rocket_critic-*.tar.gz dist/rocket-critic.tar.gz
+      - name: Check the version-less archive installs and runs
+        run: |
+          python -m venv /tmp/smoke-sdist
+          /tmp/smoke-sdist/bin/pip install dist/rocket-critic.tar.gz
+          /tmp/smoke-sdist/bin/rocket-critic --version
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS
       - uses: actions/upload-artifact@v4
