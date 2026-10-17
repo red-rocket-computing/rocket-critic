@@ -8,12 +8,13 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 import click
 
-from . import __version__, daemon, filters, proc
+from . import __version__, daemon, filters, proc, updater
 from .config import (
     CONFIG_NAME,
     DEFAULT_CONFIG_PATH,
@@ -440,6 +441,95 @@ def reload(ctx: Ctx) -> None:
     if not pid:
         raise click.ClickException(f"not running for {workdir}")
     click.echo(f"asked rocket-critic (pid {pid}) to reload {ctx.settings.path}; see {workdir / daemon.LOG_NAME}")
+
+
+@cli.command()
+@click.option("--check", is_flag=True, help="Only report whether a newer release exists.")
+@click.option("--version", "wanted", metavar="X.Y.Z", help="Install this release instead of the latest (may be older).")
+@click.option("--force", is_flag=True, help="Reinstall even if this version is already installed.")
+@click.option("--restart", is_flag=True, help="Restart the background watcher afterwards, so it runs the new version.")
+@click.option("--repo", default=updater.RELEASE_REPO, show_default=True, envvar="ROCKET_CRITIC_RELEASE_REPO",
+              help="Repository to take releases from. Env: ROCKET_CRITIC_RELEASE_REPO.")
+@pass_ctx
+def update(ctx: Ctx, check: bool, wanted: str | None, force: bool, restart: bool, repo: str) -> None:
+    """Update rocket-critic to the latest GitHub release.
+
+    Releases are found and downloaded with your gh login, so this works for a
+    private repository. The wheel is checked against the release's SHA256SUMS
+    before it is installed into the environment rocket-critic runs from (with
+    pipx for a pipx install).
+    """
+    try:
+        release = updater.find_release(repo, wanted)
+    except updater.UpdateError as exc:
+        raise click.ClickException(str(exc)) from None
+    current = __version__
+    newer = updater.version_key(release.version) > updater.version_key(current)
+    same = updater.version_key(release.version) == updater.version_key(current)
+    if check:
+        if newer:
+            click.echo(f"rocket-critic {release.version} is available (installed: {current}); "
+                       "run `rocket-critic update`")
+        elif same:
+            click.echo(f"rocket-critic {current} is up to date")
+        else:
+            click.echo(f"rocket-critic {current} is newer than release {release.version}")
+        return
+    if same and not force:
+        click.echo(f"rocket-critic {current} is up to date")
+        return
+    if not newer and not same and not wanted and not force:
+        click.echo(f"rocket-critic {current} is newer than the latest release ({release.version}); nothing to do")
+        return
+    source = updater.installed_from_source()
+    if source:
+        raise click.ClickException(f"rocket-critic is installed from a source checkout ({source}); "
+                                   "update it there with `git pull`")
+    click.echo(f"installing rocket-critic {release.version} (installed: {current}) from {release.tag}")
+    try:
+        with tempfile.TemporaryDirectory(prefix="rocket-critic-update-") as tmp:
+            wheel = updater.download(release, repo, Path(tmp))
+            updater.install(wheel, reinstall=same)
+    except updater.UpdateError as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(f"updated rocket-critic to {release.version}")
+    restart_watcher(ctx, restart, current)
+
+
+def restart_watcher(ctx: Ctx, restart: bool, old_version: str) -> None:
+    """After an update: restart the background watcher (``restart``), or say how to."""
+    try:
+        workdir = ctx.settings.workdir
+    except click.ClickException:
+        if restart:
+            raise
+        return  # no config: there is no watcher to find
+    pid = running_pid(workdir)
+    if not pid or pid < 0:
+        if restart:
+            click.echo(f"no background watcher is running for {workdir}")
+        return
+    systemd = updater.under_systemd(pid)
+    if not restart:
+        how = ("`systemctl --user restart rocket-critic` (or `sudo systemctl restart rocket-critic`)" if systemd
+               else "`rocket-critic stop && rocket-critic start`")
+        click.echo(f"the background watcher (pid {pid}) still runs {old_version}; restart it with {how}")
+        return
+    if systemd:
+        raise click.ClickException(f"the watcher (pid {pid}) was started by systemd; restart it with "
+                                   "`systemctl --user restart rocket-critic` (or `sudo systemctl restart "
+                                   "rocket-critic`)")
+    argv = updater.watcher_argv(pid)
+    if not argv:
+        raise click.ClickException(f"could not read how the watcher (pid {pid}) was started; restart it with "
+                                   "`rocket-critic stop && rocket-critic start`")
+    click.echo(f"restarting the background watcher (pid {pid}); a review in progress finishes first")
+    daemon.stop(workdir)
+    try:
+        pid = daemon.start(argv, workdir)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(f"started rocket-critic (pid {pid}); log: {workdir / daemon.LOG_NAME}")
 
 
 @cli.command()

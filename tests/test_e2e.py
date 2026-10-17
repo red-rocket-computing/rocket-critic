@@ -100,6 +100,7 @@ name = "o/r"
             "issue_comments": getattr(self, "issue_comments", []),
             "reactions": getattr(self, "reactions", []), "removed_labels": getattr(self, "removed_labels", []),
             "login": "me", "logins": {"bot-token": "rc-bot"},
+            "releases": getattr(self, "releases", []), "asset_files": getattr(self, "asset_files", {}),
         }))
 
     def new_head(self, content):
@@ -1066,3 +1067,135 @@ def test_non_json_reply_after_posting_is_fine(env, monkeypatch):
     monkeypatch.setenv("FAKE_GH_POST_STDOUT", "not json")
     assert env.run("review", "o/r#1").exit_code == 0
     assert env.state().get("o/r", 1, env.pr_sha).status == DONE
+
+
+# -- update ---------------------------------------------------------------------
+
+@pytest.fixture
+def upd(env, monkeypatch):
+    """A fake release feed for `update`, and a fake pip that records what it installs."""
+    from rocket_critic import updater
+
+    env.releases, env.asset_files = [], {}
+    env.pip_log = env.tmp / "pip.log"
+    monkeypatch.setenv("FAKE_PIP_LOG", str(env.pip_log))
+    monkeypatch.setattr(updater, "pip_command", lambda: [str(FAKES / "pip")])
+    monkeypatch.setattr(updater, "installed_from_source", lambda: None)
+    monkeypatch.setattr(updater, "in_pipx", lambda: False)
+
+    def add_release(version, sums="good"):
+        """Add a release; the newest one added is "latest"."""
+        import hashlib
+
+        wheel = env.tmp / f"rocket_critic-{version}-py3-none-any.whl"
+        wheel.write_bytes(f"wheel {version}".encode())
+        digest = hashlib.sha256(wheel.read_bytes()).hexdigest() if sums == "good" else "0" * 64
+        base = 100 + 10 * len(env.releases)
+        assets = [{"name": wheel.name, "id": base}]
+        env.asset_files[str(base)] = str(wheel)
+        if sums:
+            sums_file = env.tmp / f"SHA256SUMS-{version}"
+            sums_file.write_text(f"{digest}  {wheel.name}\n{'1' * 64}  rocket-critic.tar.gz\n")
+            assets.append({"name": "SHA256SUMS", "id": base + 1})
+            env.asset_files[str(base + 1)] = str(sums_file)
+        env.releases.insert(0, {"tag_name": f"v{version}", "assets": assets})
+        env.write_gh()
+        return digest
+
+    env.add_release = add_release
+    env.pip_calls = lambda: ([json.loads(x) for x in env.pip_log.read_text().splitlines()]
+                             if env.pip_log.exists() else [])
+    return env
+
+
+def test_update_installs_newer_release(upd):
+    from rocket_critic import __version__
+
+    digest = upd.add_release("9.0.0")
+    res = upd.run("update", "--check")
+    assert res.exit_code == 0 and f"rocket-critic 9.0.0 is available (installed: {__version__})" in res.output
+    assert upd.pip_calls() == []
+
+    res = upd.run("update")
+    assert res.exit_code == 0, res.output
+    assert "updated rocket-critic to 9.0.0" in res.output
+    (call,) = upd.pip_calls()
+    assert call["args"][:2] == ["install", "--upgrade"] and call["args"][-1].endswith("rocket_critic-9.0.0-py3-none-any.whl")
+    assert call["sha256"] == digest  # the downloaded wheel, checked against SHA256SUMS
+    # Downloads go through the REST asset endpoint, not `gh release download` (GraphQL).
+    assert not any(c[:2] == ["release", "download"] for c in upd.gh_calls())
+
+
+def test_update_when_up_to_date_or_ahead(upd):
+    from rocket_critic import __version__
+
+    upd.add_release("0.0.1")
+    res = upd.run("update")
+    assert "is newer than the latest release (0.0.1); nothing to do" in res.output and upd.pip_calls() == []
+    res = upd.run("update", "--version", "0.0.1")  # asked for by name: a downgrade is fine
+    assert res.exit_code == 0 and "updated rocket-critic to 0.0.1" in res.output
+
+    upd.add_release(__version__)
+    assert f"rocket-critic {__version__} is up to date" in upd.run("update").output
+    assert len(upd.pip_calls()) == 1
+    assert upd.run("update", "--force").exit_code == 0
+    assert upd.pip_calls()[-1]["args"][:4] == ["install", "--upgrade", "--force-reinstall", "--no-deps"]
+
+
+def test_update_refuses_bad_checksum_and_source_checkout(upd, monkeypatch):
+    from rocket_critic import updater
+
+    upd.add_release("9.0.0", sums="bad")
+    res = upd.run("update")
+    assert res.exit_code != 0 and "does not match SHA256SUMS" in res.output and upd.pip_calls() == []
+
+    upd.add_release("9.0.1")
+    monkeypatch.setattr(updater, "installed_from_source", lambda: "/src/rocket-critic")
+    res = upd.run("update")
+    assert res.exit_code != 0 and "installed from a source checkout (/src/rocket-critic)" in res.output
+    assert upd.pip_calls() == []
+
+    res = upd.run("update", "--version", "4.5.6")
+    assert res.exit_code != 0 and "could not find release v4.5.6 of sgstreet/rocket-critic" in res.output
+
+
+def test_update_install_failure_and_unverified_release(upd, monkeypatch):
+    upd.add_release("9.0.0", sums=None)  # an old release without SHA256SUMS still installs
+    monkeypatch.setenv("FAKE_PIP_EXIT", "1")
+    res = upd.run("update")
+    assert res.exit_code != 0 and "installing rocket_critic-9.0.0-py3-none-any.whl failed" in res.output
+
+
+def test_install_command_uses_pipx_for_a_pipx_install(monkeypatch, tmp_path):
+    from rocket_critic import updater
+
+    wheel = tmp_path / "rocket_critic-1.0.0-py3-none-any.whl"
+    monkeypatch.setattr(updater, "in_pipx", lambda: True)
+    monkeypatch.setattr(updater.shutil, "which", lambda name: "/usr/bin/pipx" if name == "pipx" else None)
+    assert updater.install_command(wheel) == ["/usr/bin/pipx", "install", "--force", str(wheel)]
+    monkeypatch.setattr(updater, "in_pipx", lambda: False)
+    assert updater.install_command(wheel)[1:4] == ["-m", "pip", "install"]
+    assert updater.tag_version("v1.2.3-rc1") == "1.2.3rc1"
+    assert updater.version_key("1.2.3rc1") < updater.version_key("1.2.3") < updater.version_key("1.10.0")
+
+
+def test_update_restarts_the_watcher(daemon_env, upd):
+    from rocket_critic.poller import running_pid
+
+    env = daemon_env
+    assert env.run("start", "--interval", "10s").exit_code == 0
+    old = running_pid(env.workdir)
+    wait_for(lambda: len(env.calls()) == 1, what="first review")
+
+    upd.add_release("9.0.0")
+    res = env.run("update")
+    assert res.exit_code == 0 and f"the background watcher (pid {old}) still runs" in res.output
+    assert running_pid(env.workdir) == old  # only told how to restart
+
+    upd.add_release("9.0.1")
+    res = env.run("update", "--restart")
+    assert res.exit_code == 0, res.output
+    new = running_pid(env.workdir)
+    assert new and new != old and f"started rocket-critic (pid {new})" in res.output
+    from rocket_critic.updater import watcher_argv
+    assert watcher_argv(new)[-3:] == ["watch", "--interval", "10"]  # started the same way as before

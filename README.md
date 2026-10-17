@@ -29,8 +29,7 @@ The newest release, always from the same link:
 pipx install https://github.com/sgstreet/rocket-critic/releases/latest/download/rocket-critic.tar.gz
 ```
 
-Run the same command with `--force` to upgrade an existing install. If the repository is private, download
-the archive with your `gh` login first:
+If the repository is private, download the archive with your `gh` login first:
 
 ```sh
 gh release download -R sgstreet/rocket-critic -p rocket-critic.tar.gz -D /tmp/rc --clobber
@@ -40,8 +39,21 @@ pipx install --force /tmp/rc/rocket-critic.tar.gz
 A specific release is at `releases/download/vX.Y.Z/`, as a wheel (`rocket_critic-X.Y.Z-py3-none-any.whl`) or
 source archive. From a checkout: `pip install -e '.[dev]'`.
 
-After upgrading, restart a background watcher so it runs the new code: `rocket-critic stop && rocket-critic
-start`, or `systemctl --user restart rocket-critic`.
+### Updating
+
+```sh
+rocket-critic update --check     # is there a newer release?
+rocket-critic update --restart   # install it, then restart the background watcher
+```
+
+`update` finds the latest release with your `gh` login, so it works for a private repository too. It
+downloads the release's wheel, checks it against the release's `SHA256SUMS`, and installs it into the
+environment rocket-critic runs from: with `pipx install --force` for a pipx install, otherwise with that
+environment's pip. Without `--restart`, it tells you how to restart a running watcher. A watcher started
+by systemd is restarted with `systemctl --user restart rocket-critic`, not by `update`.
+
+`--version X.Y.Z` installs a specific release, which can be older than the current one. `--force` reinstalls
+the current version. `update` won't replace a source checkout (`pip install -e`); use `git pull` there.
 
 ## Quick start
 
@@ -79,6 +91,7 @@ By default, reviews post as your own GitHub account. To post as a bot such as `r
 | `reload` | Make the running watcher re-read the config now and poll straight away. |
 | `status [--repo o/r] [-n N]` | Whether the watcher is running (and its PID), then recent reviews from the state database. |
 | `clean` | Remove leftover PR worktrees. |
+| `update [--check] [--restart] [--version X.Y.Z] [--force]` | Update rocket-critic to the latest GitHub release, found and downloaded with `gh` and checked against its `SHA256SUMS` ([details](#updating)). `--restart` restarts the background watcher afterwards. |
 
 Global options:
 

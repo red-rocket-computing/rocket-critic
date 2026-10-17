@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Fake `pip` for update tests: records its arguments and the wheel it was given."""
+import hashlib
+import json
+import os
+import sys
+
+args = sys.argv[1:]
+wheel = next((a for a in args if a.endswith(".whl")), None)
+record = {"args": args, "sha256": hashlib.sha256(open(wheel, "rb").read()).hexdigest() if wheel else None}
+with open(os.environ["FAKE_PIP_LOG"], "a") as fh:
+    fh.write(json.dumps(record) + "\n")
+sys.exit(int(os.environ.get("FAKE_PIP_EXIT", "0")))

@@ -35,6 +35,22 @@ route = path.split("?", 1)[0]
 if path.startswith("repos/o/missing"):
     print("gh: Not Found (HTTP 404)", file=sys.stderr)
     sys.exit(1)
+if args[0] == "api" and "/releases/" in route:
+    releases = data.get("releases", [])
+    if route.endswith("/releases/latest") and releases:
+        out(releases[0])
+    if "/releases/tags/" in route:
+        tag = route.rsplit("/", 1)[-1]
+        for rel in releases:
+            if rel["tag_name"] == tag:
+                out(rel)
+    if "/releases/assets/" in route and "Accept: application/octet-stream" in args:
+        path = data.get("asset_files", {}).get(route.rsplit("/", 1)[-1])
+        if path:
+            sys.stdout.buffer.write(open(path, "rb").read())
+            sys.exit(0)
+    print("gh: Not Found (HTTP 404)", file=sys.stderr)
+    sys.exit(1)
 if args[0] == "api" and route.endswith("/pulls"):
     # List form: no additions/deletions.
     pages([{k: v for k, v in pr.items() if k not in ("additions", "deletions")} for pr in data.get("prs", [])])
