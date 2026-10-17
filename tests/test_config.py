@@ -187,3 +187,24 @@ def test_github_app_config(tmp_path):
     assert app.app_id == "123" and app.private_key == (tmp_path / "keys" / "app.pem").resolve()
     assert app.installation_id is None and app.api_url == "https://api.github.com"
     assert load(cfg).repos == [] and parse({}).github_app is None
+
+
+def test_posting_and_guidelines(tmp_path):
+    from rocket_critic.config import ConfigError, load, parse
+
+    s = parse({"review": {"posting": "rocket-critic", "post_nits": False},
+               "repos": [{"name": "o/r", "review": {"review_md": False}}]})
+    assert s.review.posting == "rocket-critic" and not s.review.post_nits and s.review.review_md
+    assert s.repos[0].review.posting == "rocket-critic" and not s.repos[0].review.review_md
+    with pytest.raises(ConfigError, match="posting must be one of claude, rocket-critic"):
+        parse({"review": {"posting": "github"}})
+
+    (tmp_path / "rules.md").write_text("Be brief.\n")
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('workdir = "w"\n[review]\nguidelines = "rules.md"\n'
+                   '[[repos]]\nname = "o/r"\n[repos.review]\nguidelines = "missing.md"\n')
+    with pytest.raises(ConfigError, match=r"repos.o/r.review.guidelines: no such file: .*missing.md"):
+        load(cfg)
+    cfg.write_text('workdir = "w"\n[review]\nguidelines = "rules.md"\n[[repos]]\nname = "o/r"\n')
+    s = load(cfg)
+    assert s.review.guidelines == str(tmp_path / "rules.md") == s.repos[0].review.guidelines

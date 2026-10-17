@@ -49,6 +49,7 @@ ATTENTION = "attention"
 
 PHASE_CHECKOUT = "checkout"
 PHASE_REVIEW = "review"
+PHASE_POST = "post"  # rocket-critic posting the review (posting = "rocket-critic")
 
 
 @dataclass

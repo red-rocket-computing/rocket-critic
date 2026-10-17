@@ -146,12 +146,12 @@ class GitHubApp:
                 raise
         return self._installations[repo]
 
-    def token(self, repo: str) -> str:
-        """A new installation token (valid one hour) limited to ``repo``."""
-        data = self._request(
-            "POST",
-            f"app/installations/{self.installation_id(repo)}/access_tokens",
-            {"repositories": [repo.split("/", 1)[1]]},
-        )
+    def token(self, repo: str, read_only: bool = False) -> str:
+        """A new installation token (valid one hour) limited to ``repo``; with ``read_only``,
+        also limited to reading code and pull requests."""
+        body: dict[str, Any] = {"repositories": [repo.split("/", 1)[1]]}
+        if read_only:
+            body["permissions"] = {"contents": "read", "pull_requests": "read", "metadata": "read"}
+        data = self._request("POST", f"app/installations/{self.installation_id(repo)}/access_tokens", body)
         log.debug("minted GitHub App token for %s (expires %s)", repo, data.get("expires_at"))
         return data["token"]

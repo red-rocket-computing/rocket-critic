@@ -73,6 +73,20 @@ if args[0] == "api" and "DELETE" in args and "/labels/" in route:
     out({})
 if args[0] == "api" and route.endswith("/issues/comments"):  # repo-wide feed
     pages(data.get("issue_comments", []))
+if args[0] == "api" and route.endswith("/reviews") and "POST" in args:
+    payload = json.loads(sys.stdin.read())
+    if payload.get("comments") and os.environ.get("FAKE_GH_REJECT_INLINE"):
+        print("gh: Unprocessable Entity (HTTP 422): Line could not be resolved", file=sys.stderr)
+        sys.exit(1)
+    import time
+    login = data.get("logins", {}).get(os.environ.get("GH_TOKEN", ""), data.get("login"))
+    review = {"id": len(data.get("reviews", [])) + 1, "user": {"login": login}, "commit_id": payload.get("commit_id"),
+              "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    data.setdefault("reviews", []).append(review)
+    data.setdefault("posted_reviews", []).append({"pr": int(route.split("/")[-2]), "payload": payload,
+                                                  "token": os.environ.get("GH_TOKEN", "")})
+    save()
+    out(review)
 if args[0] == "api" and route.endswith("/reviews"):
     pages(data.get("reviews", []))
 if args[0] == "api" and route.endswith("/comments") and "/pulls/" in route:

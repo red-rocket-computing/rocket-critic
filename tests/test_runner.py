@@ -134,3 +134,39 @@ def test_review_prompt_posting_notes(tmp_path):
     assert "Use the Read, Grep and Glob tools" in text and "Don't build, test or run the project" in text
     assert text.endswith("CTX")
     assert "Bash(echo:*)" in s.claude.allowed_tools and "Bash(git remote -v)" in s.claude.allowed_tools
+
+
+def test_rocket_critic_posting_prompt_and_command(tmp_path):
+    from rocket_critic.runner import FINDINGS, NO_POST, POST, posting_mode
+
+    s = cfg(posting="rocket-critic")
+    assert posting_mode(s.review) == FINDINGS and posting_mode(s.review, comment=False) == FINDINGS
+    assert posting_mode(cfg().review) == POST and posting_mode(cfg().review, comment=False) == NO_POST
+    text = review_prompt(3, s.review, scratch=tmp_path)
+    assert text.splitlines()[0] == "/code-review 3 medium"  # never --comment: rocket-critic posts
+    assert f"{tmp_path}/findings.json" in text and "Do not post anything" in text
+    assert "gh api --method POST" not in text
+    assert f"review rules in {tmp_path}/CLAUDE.md" in text
+
+    cmd = build_command("p", s.claude, scratch=tmp_path, read_only_github=True)
+    allowed = cmd[cmd.index("--allowedTools") + 1].split(",")
+    assert not any(t.startswith("Bash(gh api") for t in allowed) and "Bash(gh pr diff:*)" in allowed
+
+
+def test_review_rules():
+    from rocket_critic.runner import FINDINGS, MAX_GUIDELINES_CHARS, POST, review_rules
+
+    text = review_rules(POST, repo_rules="Only report security bugs as Important.\n", guidelines="Skip docs/.")
+    assert "\U0001F534 Important" in text and "\U0001F7E3 Pre-existing" in text
+    assert "Start every review comment with its marker" in text
+    assert "## Repository review guidelines (REVIEW.md on the default branch)\n\nOnly report security" in text
+    assert "## Review guidelines\n\nSkip docs/." in text
+    assert "Do not post Nit findings" not in text
+    assert "Do not post Nit findings." in review_rules(POST, post_nits=False)
+
+    text = review_rules(FINDINGS, post_nits=False)
+    assert 'Record it as the `severity`' in text and "Nit findings are not posted" in text
+    assert "Repository review guidelines" not in text  # no REVIEW.md, no section
+
+    long = review_rules(POST, guidelines="line\n" * MAX_GUIDELINES_CHARS)
+    assert "(... truncated by rocket-critic)" in long and len(long) < MAX_GUIDELINES_CHARS + 3000
