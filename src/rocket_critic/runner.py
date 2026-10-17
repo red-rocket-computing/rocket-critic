@@ -12,7 +12,7 @@ from typing import Any
 
 from . import proc
 from .config import ClaudeConfig, ReviewConfig
-from .findings import FINDINGS_FILE
+from .findings import CODE_REVIEW, FINDINGS_FILE, SCALES, Scale
 from .github import Thread
 
 log = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ def posting_mode(review: ReviewConfig, comment: bool | None = None) -> str:
     return POST if (review.comment if comment is None else comment) else NO_POST
 
 
-def posting_notes(scratch: Path, mode: str = POST) -> str:
+def posting_notes(scratch: Path, mode: str = POST, scale: Scale = CODE_REVIEW) -> str:
     """How to run commands, and post or record findings, within rocket-critic's permissions."""
     lines = [
         "## Working notes (from rocket-critic)",
@@ -69,13 +69,16 @@ def posting_notes(scratch: Path, mode: str = POST) -> str:
             f"- When the review is done, write your findings with the Write tool to {scratch}/{FINDINGS_FILE}",
             "  (also when there are none: use an empty list), as JSON in this form:",
             '  {"summary": "One or two sentences on the change and the review.",',
-            '   "findings": [{"path": "src/app.py", "line": 42, "start_line": 40, "severity": "important",',
+            f'   "findings": [{{"path": "src/app.py", "line": 42, "start_line": 40, "severity": "{scale.keys[0]}",'
+            + (' "pre_existing": false,' if scale.pre_existing_flag else ""),
             '                 "title": "Short statement of the problem",',
             '                 "body": "Why it is a problem and how to fix it (Markdown)."}]}',
             "  `path` is relative to the repository root. `line` (and optional `start_line`, for a range) are",
             "  line numbers in the pull request's version of the file. `severity` is exactly one of",
-            '  "important", "nit" or "pre-existing"; don\'t put severity markers in the title or body.',
+            f"  {_quoted(scale.keys)}; don't put severity markers in the title or body.",
         ]
+        if scale.pre_existing_flag:
+            lines.append('  Set `"pre_existing": true` for a problem in code this pull request did not introduce.')
     elif mode == POST:
         lines += [
             "- Shell heredocs and quoted strings containing backticks or `$(...)` are blocked, and review",
@@ -88,7 +91,8 @@ def posting_notes(scratch: Path, mode: str = POST) -> str:
     return "\n".join(lines)
 
 
-def review_rules(mode: str, *, post_nits: bool = True, repo_rules: str = "", guidelines: str = "") -> str:
+def review_rules(mode: str, *, scale: Scale = CODE_REVIEW, min_severity: str = "", repo_rules: str = "",
+                 guidelines: str = "") -> str:
     """The CLAUDE.md rocket-critic puts in the scratch directory: severities and review guidelines.
 
     ``repo_rules`` is REVIEW.md from the default branch and ``guidelines`` the configured
@@ -103,30 +107,47 @@ def review_rules(mode: str, *, post_nits: bool = True, repo_rules: str = "", gui
         "",
         "## Severity",
         "",
-        "Give every finding exactly one severity:",
-        "",
-        "- \U0001F534 Important: a bug, security problem or regression that should be fixed before merging.",
-        "- \U0001F7E1 Nit: a minor issue worth fixing but not blocking (naming, style, small clean-ups, unclear",
-        "  comments or messages).",
-        "- \U0001F7E3 Pre-existing: a real problem in code this pull request did not introduce.",
+        "Give every finding exactly one severity, from most to least severe:",
         "",
     ]
+    lines += [f"- {lvl.marker} {lvl.name}: {lvl.meaning}." for lvl in scale.levels]
+    top = scale.levels[0]
+    if scale.pre_existing_flag:
+        lines += ["", "A problem in code this pull request did not introduce still gets a severity, and is also "
+                  "marked as pre-existing."]
+    lines.append("")
     if mode == FINDINGS:
-        lines.append('Record it as the `severity` of each finding: "important", "nit" or "pre-existing". '
-                     "rocket-critic adds the marker when it posts the review.")
+        lines.append(f"Record it as the `severity` of each finding: {_quoted(scale.keys)}"
+                     + (', and set `"pre_existing": true` where it applies' if scale.pre_existing_flag else "")
+                     + ". rocket-critic adds the marker when it posts the review.")
     else:
         lines.append("Start every review comment with its marker and severity in bold, then the problem, for "
-                     "example: `\U0001F534 **Important**: retry loop never stops after a 404`.")
-    if not post_nits:
-        lines.append("Nit findings are not posted, so don't spend effort on them."
-                     if mode == FINDINGS else "Do not post Nit findings.")
-    lines += ["", "The guidelines below may redefine these levels, limit how many Nits to report, or exclude "
-              "files and kinds of findings; follow them."]
+                     f"example: `{top.marker} **{top.name}**: retry loop never stops after a 404`.")
+        if scale.pre_existing_flag:
+            lvl = scale.levels[len(scale.levels) // 2]
+            lines.append("For a problem in code this pull request did not introduce, add `(pre-existing)` after "
+                         f"the severity: `{lvl.marker} **{lvl.name}** (pre-existing): ...`.")
+    if min_severity:
+        lvl = scale.level(min_severity)
+        below = [x.name for x in scale.levels[scale.rank(min_severity) + 1:]]
+        posted = lvl.name if lvl is top else f"{lvl.name} and more severe"
+        if below:
+            lines.append(f"Only {posted} findings are posted, so don't spend effort on {' or '.join(below)} "
+                         "findings." if mode == FINDINGS else
+                         f"Only post {posted} findings; leave out {' and '.join(below)} ones.")
+    lines += ["", "The guidelines below may redefine these levels, limit how many minor findings to report, or "
+              "exclude files and kinds of findings; follow them."]
     if repo_rules.strip():
         lines += ["", "## Repository review guidelines (REVIEW.md on the default branch)", "", _cap(repo_rules)]
     if guidelines.strip():
         lines += ["", "## Review guidelines", "", _cap(guidelines)]
     return "\n".join(lines) + "\n"
+
+
+def _quoted(keys: list[str]) -> str:
+    """'"a", "b" or "c"'."""
+    quoted = [f'"{k}"' for k in keys]
+    return ", ".join(quoted[:-1]) + f" or {quoted[-1]}" if len(quoted) > 1 else quoted[0]
 
 
 def _cap(text: str) -> str:
@@ -145,6 +166,7 @@ def review_prompt(number: int, review: ReviewConfig, *, comment: bool | None = N
     ``--append-system-prompt``.
     """
     mode = posting_mode(review, comment)
+    scale = SCALES[review.severities]
     parts = ["/code-review", str(number), review.level]
     if review.max_findings:
         parts += ["--max-findings", review.max_findings]
@@ -152,7 +174,7 @@ def review_prompt(number: int, review: ReviewConfig, *, comment: bool | None = N
         parts.append("--comment")
     sections = [" ".join(parts)]
     if scratch is not None:
-        sections.append(posting_notes(scratch, mode))
+        sections.append(posting_notes(scratch, mode, scale))
     if context:
         sections.append(context)
     return "\n\n".join(sections)

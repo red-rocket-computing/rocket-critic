@@ -122,12 +122,14 @@ def test_build_review_places_findings():
     assert len(review.inline) == 3 and len(review.outside) == 1
 
 
-def test_build_review_holds_nits_and_falls_back_to_body():
-    findings = [Finding("app.py", 3, "important", "Bug", ""), Finding("app.py", 2, "nit", "Name", "")]
-    review = build_review("", findings, commentable_lines(DIFF), "abc", post_nits=False)
-    assert len(review.payload["comments"]) == 1 and review.nits_held == 1
-    assert "1 \U0001F7E1 Nit finding(s) not posted." in review.payload["body"]
-    assert "0 \U0001F7E1 Nit" in review.payload["body"]
+def test_build_review_holds_minor_findings_and_falls_back_to_body():
+    findings = [Finding("app.py", 3, "important", "Bug", ""), Finding("app.py", 2, "nit", "Name", ""),
+                Finding("old.py", 1, "pre-existing", "Old", "")]
+    review = build_review("", findings, commentable_lines(DIFF), "abc", min_severity="important")
+    assert len(review.payload["comments"]) == 1 and len(review.held) == 2
+    assert "2 finding(s) less severe than \U0001F534 Important not posted." in review.payload["body"]
+    assert "0 \U0001F7E1 Nit" in review.payload["body"] and "old.py" not in review.payload["body"]
+    assert len(build_review("", findings, commentable_lines(DIFF), "abc", min_severity="nit").held) == 1
 
     flat = build_review("", findings, commentable_lines(DIFF), "abc", inline=False)
     assert flat.payload["comments"] == [] and "### Findings\n" in flat.payload["body"]
@@ -135,3 +137,36 @@ def test_build_review_holds_nits_and_falls_back_to_body():
 
     empty = build_review("Nothing to report.", [], {}, "abc")
     assert "No issues found." in empty.payload["body"] and empty.payload["comments"] == []
+
+
+def test_traditional_scale():
+    from rocket_critic.findings import TRADITIONAL, counts
+
+    assert [normalize_severity(v, TRADITIONAL) for v in ("Blocker", "major", "warning", "nit", "note")] == \
+        ["critical", "high", "medium", "low", "info"]
+    assert normalize_severity("pre-existing", TRADITIONAL) is None
+    assert normalize_severity("high") == "important"  # the same word on the code-review scale
+
+    summary, findings = parse_findings(doc(
+        item(severity="High", title="\U0001F7E0 **High**: Wrong value"),
+        item(severity="medium", pre_existing=True, title="\U0001F7E1 **Medium** (pre-existing): Old bug"),
+    ), TRADITIONAL)
+    assert findings[0] == Finding("app.py", 2, "high", "Wrong value", "Use 3.", scale="traditional")
+    assert findings[1].pre_existing and findings[1].title == "Old bug"
+    assert findings[1].label == "\U0001F7E1 **Medium** (pre-existing)"
+    assert counts(findings, TRADITIONAL) == ("0 \U0001F534 Critical \u00b7 1 \U0001F7E0 High \u00b7 1 \U0001F7E1 Medium"
+                                            " \u00b7 0 \U0001F535 Low \u00b7 0 \u26AA Info \u00b7 1 pre-existing")
+
+    with pytest.raises(FindingsError, match=r'is not one of critical, high, medium, low, info \(give a level and set '
+                                            r'"pre_existing": true\)'):
+        parse_findings(doc(item(severity="pre-existing")), TRADITIONAL)
+    with pytest.raises(FindingsError, match="pre_existing must be true or false"):
+        parse_findings(doc(item(severity="low", pre_existing="yes")), TRADITIONAL)
+
+    # On the code-review scale the flag turns a finding into the Pre-existing level.
+    (f,) = parse_findings(doc(item(pre_existing=True)))[1]
+    assert f.severity == "pre-existing" and not f.pre_existing
+
+    review = build_review("", findings, commentable_lines(DIFF), "abc", min_severity="high", scale=TRADITIONAL)
+    assert [c["body"].split(":")[0] for c in review.payload["comments"]] == ["\U0001F7E0 **High**"]
+    assert "1 finding(s) less severe than \U0001F7E0 High not posted." in review.payload["body"]

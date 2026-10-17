@@ -147,6 +147,11 @@ def test_rocket_critic_posting_prompt_and_command(tmp_path):
     assert f"{tmp_path}/findings.json" in text and "Do not post anything" in text
     assert "gh api --method POST" not in text
     assert f"review rules in {tmp_path}/CLAUDE.md" in text
+    assert '"important", "nit" or "pre-existing"' in text and "pre_existing" not in text
+
+    text = review_prompt(3, cfg(posting="rocket-critic", severities="traditional").review, scratch=tmp_path)
+    assert '"severity": "critical", "pre_existing": false' in text
+    assert '"critical", "high", "medium", "low" or "info"' in text
 
     cmd = build_command("p", s.claude, scratch=tmp_path, read_only_github=True)
     allowed = cmd[cmd.index("--allowedTools") + 1].split(",")
@@ -161,12 +166,23 @@ def test_review_rules():
     assert "Start every review comment with its marker" in text
     assert "## Repository review guidelines (REVIEW.md on the default branch)\n\nOnly report security" in text
     assert "## Review guidelines\n\nSkip docs/." in text
-    assert "Do not post Nit findings" not in text
-    assert "Do not post Nit findings." in review_rules(POST, post_nits=False)
+    assert "Only post" not in text
+    assert "Only post Important findings; leave out Nit and Pre-existing ones." in review_rules(
+        POST, min_severity="important")
 
-    text = review_rules(FINDINGS, post_nits=False)
-    assert 'Record it as the `severity`' in text and "Nit findings are not posted" in text
+    text = review_rules(FINDINGS, min_severity="nit")
+    assert 'Record it as the `severity` of each finding: "important", "nit" or "pre-existing".' in text
+    assert "Only Nit and more severe findings are posted, so don't spend effort on Pre-existing findings." in text
     assert "Repository review guidelines" not in text  # no REVIEW.md, no section
+
+    from rocket_critic.findings import TRADITIONAL
+
+    text = review_rules(POST, scale=TRADITIONAL, min_severity="medium")
+    assert "- \U0001F7E0 High: a bug that breaks a feature" in text and "- \u26AA Info:" in text
+    assert "`\U0001F534 **Critical**: retry loop" in text and "add `(pre-existing)` after the severity" in text
+    assert "Only post Medium and more severe findings; leave out Low and Info ones." in text
+    text = review_rules(FINDINGS, scale=TRADITIONAL)
+    assert '"critical", "high", "medium", "low" or "info", and set `"pre_existing": true`' in text
 
     long = review_rules(POST, guidelines="line\n" * MAX_GUIDELINES_CHARS)
     assert "(... truncated by rocket-critic)" in long and len(long) < MAX_GUIDELINES_CHARS + 3000

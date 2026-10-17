@@ -192,12 +192,22 @@ def test_github_app_config(tmp_path):
 def test_posting_and_guidelines(tmp_path):
     from rocket_critic.config import ConfigError, load, parse
 
-    s = parse({"review": {"posting": "rocket-critic", "post_nits": False},
+    s = parse({"review": {"posting": "rocket-critic", "min_severity": "important"},
                "repos": [{"name": "o/r", "review": {"review_md": False}}]})
-    assert s.review.posting == "rocket-critic" and not s.review.post_nits and s.review.review_md
+    assert s.review.posting == "rocket-critic" and s.review.min_severity == "important" and s.review.review_md
     assert s.repos[0].review.posting == "rocket-critic" and not s.repos[0].review.review_md
     with pytest.raises(ConfigError, match="posting must be one of claude, rocket-critic"):
         parse({"review": {"posting": "github"}})
+
+    s = parse({"review": {"severities": "traditional", "min_severity": "medium"},
+               "repos": [{"name": "o/r", "review": {"severities": "code-review", "min_severity": "nit"}}]})
+    assert s.review.severities == "traditional" and s.repos[0].review.min_severity == "nit"
+    with pytest.raises(ConfigError, match="severities must be one of code-review, traditional"):
+        parse({"review": {"severities": "cvss"}})
+    with pytest.raises(ConfigError, match=r'min_severity must be "" or one of important, nit, pre-existing'):
+        parse({"review": {"min_severity": "medium"}})
+    with pytest.raises(ConfigError, match=r"repos.o/r.review.min_severity .* critical, high, medium, low, info"):
+        parse({"review": {"severities": "traditional"}, "repos": [{"name": "o/r", "review": {"min_severity": "nit"}}]})
 
     (tmp_path / "rules.md").write_text("Be brief.\n")
     cfg = tmp_path / "config.toml"

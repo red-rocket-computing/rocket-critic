@@ -205,13 +205,34 @@ This context is appended to the `/code-review` arguments, because `/code-review`
 
 ### Severities and review rules
 
-Every finding gets one of three severities, as in GitHub's hosted Claude Code Review:
+Every finding gets a severity from one of two scales, chosen with `severities` in `[review]` or
+`[repos.review]`.
+
+`severities = "code-review"` (the default) uses the three levels of GitHub's hosted Claude Code Review:
 
 | | Severity | Meaning |
 |---|---|---|
 | 🔴 | Important | A bug, security problem or regression to fix before merging |
 | 🟡 | Nit | Worth fixing, not blocking |
 | 🟣 | Pre-existing | A real problem in code the PR didn't introduce |
+
+`severities = "traditional"` uses the usual five levels of issue trackers and security reports:
+
+| | Severity | Meaning |
+|---|---|---|
+| 🔴 | Critical | Security vulnerability, data loss or corruption, crash or outage in normal use; must be fixed before merging |
+| 🟠 | High | Breaks a feature or gives wrong results in common cases; should be fixed before merging |
+| 🟡 | Medium | Edge-case or error-handling bug, or a performance, reliability or maintainability problem |
+| 🔵 | Low | Naming, style, readability, small clean-ups |
+| ⚪ | Info | An observation or suggestion; no change required |
+
+On the traditional scale, a problem in code the PR didn't introduce keeps its level and is also marked
+pre-existing, e.g. `🟡 **Medium** (pre-existing)`.
+
+`min_severity` leaves out less severe findings: `min_severity = "important"` posts only Important
+findings, and `min_severity = "medium"` posts Critical, High and Medium. On the code-review scale the
+order is Important, Nit, Pre-existing, so `"nit"` leaves out only Pre-existing findings. The value must
+be a level of the chosen scale.
 
 rocket-critic writes these rules to a `CLAUDE.md` in the review's scratch directory and sets
 `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`, so Claude loads that file as memory for the review. The
@@ -226,8 +247,6 @@ file also holds:
 
 The PR's own `CLAUDE.md` is not loaded: `--setting-sources user` leaves out project memory.
 
-`post_nits = false` drops Nit findings.
-
 ### Who posts the review
 
 With `posting = "claude"` (the default), `/code-review --comment` posts its own comments and is told to
@@ -239,10 +258,13 @@ With `posting = "rocket-critic"`, rocket-critic posts the review itself and chec
 1. `/code-review` runs without `--comment` and writes its findings to `findings.json` in the scratch
    directory: path, line (optional start line), severity, title and body for each.
 2. rocket-critic checks every finding. Each must have a path, a positive line number and a severity it
-   recognises (`important`, `nit`, `pre-existing`, or an unambiguous synonym such as `critical` or
-   `minor`). If any finding fails, **nothing is posted**: the review is recorded as `failed`, with the
-   rejected file kept next to the run output, and retried like any other failure.
-3. It adds the marker itself (`🔴 **Important**: …`) and posts **one review**: an inline comment for each
+   recognises: a level of the chosen scale, or an unambiguous synonym (on the code-review scale,
+   `critical` counts as Important and `minor` as Nit; on the traditional scale, `blocker` counts as
+   Critical and `warning` as Medium). On the traditional scale a finding can also carry
+   `"pre_existing": true`. If any finding fails, **nothing is posted**: the review is recorded as
+   `failed`, with the rejected file kept next to the run output, and retried like any other failure.
+3. It leaves out findings below `min_severity`, adds the marker itself (`🔴 **Important**: …`) and posts
+   **one review**: an inline comment for each
    finding on a line of the PR's diff, and the rest, such as most Pre-existing findings, listed in the
    review body with their `path:line`, under a count of findings by severity. If GitHub still refuses
    a comment's position, every finding goes in the body instead.

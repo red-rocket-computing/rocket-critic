@@ -18,7 +18,7 @@ from pathlib import Path
 from . import filters, proc
 from .config import RepoConfig, Settings
 from .ghapp import GitHubApp, GitHubAppError
-from .findings import (FINDINGS_FILE, FindingsError, Review, build_review, commentable_lines, counts,
+from .findings import (FINDINGS_FILE, SCALES, FindingsError, Review, build_review, commentable_lines, counts,
                        extract_json, parse_findings)
 from .github import GitHub, PullRequest
 from .runner import (FINDINGS, ReviewError, ReviewResult, build_env, posting_mode, rereview_context, review_rules,
@@ -191,8 +191,8 @@ class Critic:
                 raise ReviewError(f"review guidelines: {exc}") from None
         if repo_rules:
             log.info("%s: following REVIEW.md from the default branch", pr.ref)
-        return review_rules(mode, post_nits=repo.review.post_nits, repo_rules=repo_rules or "",
-                            guidelines=guidelines)
+        return review_rules(mode, scale=SCALES[repo.review.severities], min_severity=repo.review.min_severity,
+                            repo_rules=repo_rules or "", guidelines=guidelines)
 
     def publish(self, pr: PullRequest, repo: RepoConfig, text: str | None, diff: str, output_path: Path,
                 post: bool) -> tuple[str, str | None]:
@@ -203,14 +203,16 @@ class Critic:
         stem = output_path.with_suffix("")
         if text is None:
             return FAILED, f"claude wrote no {FINDINGS_FILE} (and no findings JSON in its reply); nothing posted"
+        scale = SCALES[repo.review.severities]
         try:
-            summary, findings = parse_findings(text)
+            summary, findings = parse_findings(text, scale)
         except FindingsError as exc:
             stem.with_name(stem.name + ".findings-rejected.json").write_text(text)
             return FAILED, f"findings rejected, nothing posted: {exc}"
-        review = build_review(summary, findings, commentable_lines(diff), pr.head_sha, repo.review.post_nits)
+        review = build_review(summary, findings, commentable_lines(diff), pr.head_sha, repo.review.min_severity,
+                              scale=scale)
         self.save_review(output_path, review)
-        what = counts(review.inline + review.outside) if findings else "no findings"
+        what = counts(review.inline + review.outside, scale) if findings else "no findings"
         if not post:
             log.info("%s: %s (not posted)", pr.ref, what)
             return DONE, None
@@ -228,7 +230,8 @@ class Critic:
                 # GitHub rejects the whole review if it can't place one comment; nothing was posted.
                 log.warning("%s: GitHub refused the inline comments (%s); listing them in the review body",
                             pr.ref, exc)
-                review = build_review(summary, findings, {}, pr.head_sha, repo.review.post_nits, inline=False)
+                review = build_review(summary, findings, {}, pr.head_sha, repo.review.min_severity, inline=False,
+                                      scale=scale)
                 self.save_review(output_path, review)
                 poster.post_review(pr.repo, pr.number, review.payload)
         except (proc.CommandError, GitHubAppError) as exc:

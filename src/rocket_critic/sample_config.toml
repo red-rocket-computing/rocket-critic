@@ -56,11 +56,13 @@ keep_worktrees = false               # keep PR checkouts after review (debugging
 max_reviews_per_pr = 5               # stop re-reviewing a PR after this many reviews (0 = no limit)
 settle_seconds = 0                   # wait this long after a push before reviewing (coalesces bursts)
 incremental = true                   # re-reviews only cover new commits and see earlier review threads
-# Every finding is labelled 🔴 Important, 🟡 Nit or 🟣 Pre-existing. The rules
-# reach claude as a CLAUDE.md in the review's scratch directory, not the PR's.
+# Every finding gets a severity. The rules reach claude as a CLAUDE.md in the
+# review's scratch directory, not the PR's.
+severities = "code-review"           # code-review: 🔴 Important, 🟡 Nit, 🟣 Pre-existing
+                                     # traditional: 🔴 Critical, 🟠 High, 🟡 Medium, 🔵 Low, ⚪ Info
+min_severity = ""                    # leave out less severe findings, e.g. "important" or "medium"
 review_md = true                     # follow REVIEW.md from the repo's default branch (never the PR's copy)
 guidelines = ""                      # extra review rules: a Markdown file (relative to this file)
-post_nits = true                     # post 🟡 Nit findings too
 posting = "claude"                   # claude: /code-review posts its own comments; rocket-critic: claude
                                      # writes findings to a file, rocket-critic checks each one's severity
                                      # and position and posts them as one review

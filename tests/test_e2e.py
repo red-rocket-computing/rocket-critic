@@ -985,7 +985,7 @@ def test_findings_printed_instead_of_written(env, monkeypatch):
 
 
 def test_nits_held_back_and_rejected_positions(env, monkeypatch):
-    env.write_config(review='posting = "rocket-critic"\npost_nits = false')
+    env.write_config(review='posting = "rocket-critic"\nmin_severity = "important"')
     monkeypatch.setenv("FAKE_CLAUDE_FINDINGS", str(findings_file(env, BUG, NIT)))
     monkeypatch.setenv("FAKE_GH_REJECT_INLINE", "1")
     assert env.run("review", "o/r#1").exit_code == 0
@@ -994,7 +994,7 @@ def test_nits_held_back_and_rejected_positions(env, monkeypatch):
     # GitHub refused the inline comment, so it went into the body; the nit wasn't posted at all.
     assert posted["payload"]["comments"] == []
     assert "### Findings\n" in body and "\U0001F534 **Important** `app.py:1`: Wrong output" in body
-    assert "quotes" not in body and "1 \U0001F7E1 Nit finding(s) not posted." in body
+    assert "quotes" not in body and "1 finding(s) less severe than \U0001F534 Important not posted." in body
 
 
 def test_no_comment_saves_findings_without_posting(env, monkeypatch):
@@ -1027,3 +1027,19 @@ def test_rocket_critic_posting_as_github_app(env, app_api, monkeypatch):
     (posted,) = env.reload_gh()["posted_reviews"]
     assert posted["token"] == post_token["token"]
     assert env.state().get("o/r", 1, env.pr_sha).status == DONE
+
+
+def test_traditional_severities(env, monkeypatch):
+    env.write_config(review='posting = "rocket-critic"\nseverities = "traditional"\nmin_severity = "low"')
+    monkeypatch.setenv("FAKE_CLAUDE_FINDINGS", str(findings_file(
+        env, dict(BUG, severity="critical"), dict(NIT, severity="info"),
+        dict(OLD, severity="medium", pre_existing=True))))
+    assert env.run("review", "o/r#1").exit_code == 0
+    call = env.calls()[-1]
+    assert "\U0001F7E0 High:" in call["rules"] and '"critical", "high", "medium", "low" or "info"' in call["argv"][1]
+    (posted,) = env.reload_gh()["posted_reviews"]
+    payload = posted["payload"]
+    assert [c["body"].split("\n")[0] for c in payload["comments"]] == ["\U0001F534 **Critical**: Wrong output"]
+    assert "- \U0001F7E1 **Medium** (pre-existing) `lib.py:5`: Leaks a file" in payload["body"]
+    assert "1 finding(s) less severe than \U0001F535 Low not posted." in payload["body"]
+    assert "1 pre-existing" in payload["body"]
