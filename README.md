@@ -103,6 +103,8 @@ GH_TOKEN = "${ROCKET_CRITIC_GH_TOKEN}"
 [review]
 level = "medium"                   # low | medium | high | xhigh | max
 comment = true
+posting = "claude"                 # or "rocket-critic": checked severities, one review (see below)
+guidelines = ""                    # extra review rules, a Markdown file
 
 [[repos]]
 name = "owner/repo"
@@ -179,7 +181,8 @@ it takes the request, or 😕 when the size limit or `max_reviews_per_pr` refuse
 
 A failed review is retried with exponential backoff, up to `max_attempts` times per commit. Before retrying a
 run that got as far as starting `/code-review --comment`, rocket-critic checks GitHub for reviews or comments
-the posting identity made since that run started. If it finds any, or it can't tell who the posting identity
+the posting identity made since that run started (with `posting = "rocket-critic"`, also before retrying a
+run that got as far as posting). If it finds any, or it can't tell who the posting identity
 is, the commit is marked `attention` instead of retried, so a partial review is never posted twice. The same
 check covers a review interrupted by a crash or restart. Use `review --force` to redo it.
 
@@ -199,6 +202,79 @@ With `incremental = true` (the default), a re-review after new commits tells `/c
 
 This context is appended to the `/code-review` arguments, because `/code-review` ignores
 `--append-system-prompt`. Use `review --full` for a fresh full review.
+
+### Severities and review rules
+
+Every finding gets a severity from one of two scales, chosen with `severities` in `[review]` or
+`[repos.review]`.
+
+`severities = "code-review"` (the default) uses the three levels of GitHub's hosted Claude Code Review:
+
+| | Severity | Meaning |
+|---|---|---|
+| 🔴 | Important | A bug, security problem or regression to fix before merging |
+| 🟡 | Nit | Worth fixing, not blocking |
+| 🟣 | Pre-existing | A real problem in code the PR didn't introduce |
+
+`severities = "traditional"` uses the usual five levels of issue trackers and security reports:
+
+| | Severity | Meaning |
+|---|---|---|
+| 🔴 | Critical | Security vulnerability, data loss or corruption, crash or outage in normal use; must be fixed before merging |
+| 🟠 | High | Breaks a feature or gives wrong results in common cases; should be fixed before merging |
+| 🟡 | Medium | Edge-case or error-handling bug, or a performance, reliability or maintainability problem |
+| 🔵 | Low | Naming, style, readability, small clean-ups |
+| ⚪ | Info | An observation or suggestion; no change required |
+
+On the traditional scale, a problem in code the PR didn't introduce keeps its level and is also marked
+pre-existing, e.g. `🟡 **Medium** (pre-existing)`.
+
+`min_severity` leaves out less severe findings: `min_severity = "important"` posts only Important
+findings, and `min_severity = "medium"` posts Critical, High and Medium. On the code-review scale the
+order is Important, Nit, Pre-existing, so `"nit"` leaves out only Pre-existing findings. The value must
+be a level of the chosen scale.
+
+rocket-critic writes these rules to a `CLAUDE.md` in the review's scratch directory and sets
+`CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1`, so Claude loads that file as memory for the review. The
+file also holds:
+
+- **`REVIEW.md` from the repo's default branch** (`review_md = true`, the default), in the same spirit as
+  the hosted Code Review: use it to redefine what counts as Important, cap the number of nits, or skip
+  paths and kinds of findings. It is always read from the default branch, never from the PR, so a PR
+  can't change the rules it is reviewed by.
+- **Your own guidelines**: `guidelines = "review-guidelines.md"` in `[review]` or `[repos.review]`, a
+  Markdown file (a relative path is relative to the config file).
+
+The PR's own `CLAUDE.md` is not loaded: `--setting-sources user` leaves out project memory.
+
+### Who posts the review
+
+With `posting = "claude"` (the default), `/code-review --comment` posts its own comments and is told to
+start each one with its severity marker. That is an instruction to the model, which may not always
+follow it.
+
+With `posting = "rocket-critic"`, rocket-critic posts the review itself and checks it first:
+
+1. `/code-review` runs without `--comment` and writes its findings to `findings.json` in the scratch
+   directory: path, line (optional start line), severity, title and body for each.
+2. rocket-critic checks every finding. Each must have a path, a positive line number and a severity it
+   recognises: a level of the chosen scale, or an unambiguous synonym (on the code-review scale,
+   `critical` counts as Important and `minor` as Nit; on the traditional scale, `blocker` counts as
+   Critical and `warning` as Medium). On the traditional scale a finding can also carry
+   `"pre_existing": true`. If any finding fails, **nothing is posted**: the review is recorded as
+   `failed`, with the rejected file kept next to the run output, and retried like any other failure.
+3. It leaves out findings below `min_severity`, adds the marker itself (`🔴 **Important**: …`) and posts
+   **one review**: an inline comment for each
+   finding on a line of the PR's diff, and the rest, such as most Pre-existing findings, listed in the
+   review body with their `path:line`, under a count of findings by severity. If GitHub still refuses
+   a comment's position, every finding goes in the body instead.
+
+In this mode Claude can't post: `gh api`, `gh pr review` and `gh pr comment` are denied (a deny rule,
+so a broader allow such as `Bash(gh:*)` doesn't reopen them), and with a GitHub App its token is
+read-only. With a user token, rocket-critic also checks that nothing was posted during the run
+before posting, and marks the commit `attention` if something was. `review --no-comment` saves the
+checked review (`WORKDIR/runs/OWNER/REPO/N/SHA.review.json`, and the run's `.md` output) without posting
+it.
 
 ### Working directory
 
@@ -378,8 +454,9 @@ injection. rocket-critic limits what such a PR can do:
   `WebFetch` and `WebSearch` are disallowed, and `--fix` is never passed. Claude can write files only in
   a per-review scratch directory (`WORKDIR/runs/OWNER/REPO/N/scratch-SHA/`, deleted afterwards), never in
   the checkout.
-- To post comments, the allowlist must include `gh api`, and that command can call any GitHub endpoint
-  the token allows. Give `/code-review` its own limited identity: a [GitHub App](#github-app)
+- With `posting = "claude"`, the allowlist must include `gh api` to post comments, and that command can
+  call any GitHub endpoint the token allows. (With `posting = "rocket-critic"`, Claude gets no `gh api`,
+  and with a GitHub App only a read-only token.) Give `/code-review` its own limited identity: a [GitHub App](#github-app)
   (recommended; its tokens last an hour and cover only the repo being reviewed) or a
   [fine-grained token](#review-token) limited to the watched repos, with only *Pull requests: read and
   write* and *Contents: read*. A hijacked review can then do no more than post PR comments.

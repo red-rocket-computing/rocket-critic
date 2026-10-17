@@ -18,10 +18,13 @@ from pathlib import Path
 from . import filters, proc
 from .config import RepoConfig, Settings
 from .ghapp import GitHubApp, GitHubAppError
+from .findings import (FINDINGS_FILE, SCALES, FindingsError, Review, build_review, commentable_lines, counts,
+                       extract_json, parse_findings)
 from .github import GitHub, PullRequest
-from .runner import ReviewError, build_env, rereview_context, run_review
+from .runner import (FINDINGS, ReviewError, ReviewResult, build_env, posting_mode, rereview_context, review_rules,
+                     run_review)
 from .github import _ts
-from .state import ATTENTION, DONE, FAILED, PHASE_REVIEW, SKIPPED, Record, State
+from .state import ATTENTION, DONE, FAILED, PHASE_POST, PHASE_REVIEW, SKIPPED, Record, State
 from .workspace import Workspace
 
 log = logging.getLogger(__name__)
@@ -86,12 +89,13 @@ class Critic:
             return GitHub(self.gh.gh, env={**os.environ, "GH_TOKEN": self.app.token(repo.name)})
         return GitHub(self.gh.gh, env=build_env(repo.claude, repo.name))
 
-    def app_env(self, repo: RepoConfig) -> dict[str, str]:
-        """GH_TOKEN for the claude subprocess: a fresh installation token limited to the repo."""
+    def app_env(self, repo: RepoConfig, read_only: bool = False) -> dict[str, str]:
+        """GH_TOKEN for the claude subprocess: a fresh installation token limited to the repo
+        (and to reading, when rocket-critic posts the review)."""
         if not self.uses_app(repo):
             return {}
         try:
-            return {"GH_TOKEN": self.app.token(repo.name)}
+            return {"GH_TOKEN": self.app.token(repo.name, read_only=read_only)}
         except GitHubAppError as exc:
             raise ReviewError(f"GitHub App token: {exc}") from None
 
@@ -107,20 +111,32 @@ class Critic:
         """
         incremental = repo.review.incremental if incremental is None else incremental
         last = self.state.last_done(pr.repo, pr.number) if incremental else None
+        mode = posting_mode(repo.review, comment)
         self.state.start(pr.repo, pr.number, pr.head_sha)
         worktree = scratch = None
+        findings_text = diff = None
         out_dir = self.settings.workdir / "runs" / pr.repo / str(pr.number)
         try:
             worktree = self.ws.checkout(pr.repo, pr.number, pr.head_sha, pr.base_ref)
             context = self.rereview_context(pr, repo, last.head_sha) if last else ""
-            extra_env = self.app_env(repo)
-            # The only place claude may write: payload files for gh api --input.
+            extra_env = self.app_env(repo, read_only=mode == FINDINGS)
+            # The only place claude may write: the review rules (CLAUDE.md), and its
+            # findings or payload files for gh api --input.
             scratch = out_dir / f"scratch-{pr.head_sha[:12]}"
             shutil.rmtree(scratch, ignore_errors=True)
             scratch.mkdir(parents=True)
+            rules = self.review_rules(pr, repo, mode)
             self.state.set_phase(pr.repo, pr.number, pr.head_sha, PHASE_REVIEW)
             result = run_review(worktree, pr.repo, pr.number, repo.claude, repo.review, comment=comment,
-                                context=context, extra_env=extra_env, scratch=scratch)
+                                context=context, extra_env=extra_env, scratch=scratch, rules=rules,
+                                base_ref=pr.base_ref)
+            if mode == FINDINGS and not result.is_error:
+                findings_text = read_findings(scratch, result)
+                try:
+                    diff = self.ws.diff(worktree, pr.base_ref)
+                except proc.CommandError as exc:
+                    # Not worth losing the review over: every finding goes in the review body.
+                    log.warning("%s: could not diff against %s: %s", pr.ref, pr.base_ref, exc)
         except (ReviewError, proc.CommandError) as exc:
             self.state.finish(pr.repo, pr.number, pr.head_sha, FAILED, error=str(exc))
             log.error("%s: review failed: %s", pr.ref, exc)
@@ -144,6 +160,9 @@ class Critic:
 
         status = FAILED if result.is_error else DONE
         error = (result.text.strip().splitlines() or ["claude reported an error"])[-1] if result.is_error else None
+        if status == DONE and mode == FINDINGS:
+            post = repo.review.comment if comment is None else comment
+            status, error = self.publish(pr, repo, findings_text, diff or "", output_path, post)
         self.state.finish(
             pr.repo, pr.number, pr.head_sha, status, error=error, cost_usd=result.cost_usd,
             duration_ms=result.duration_ms, num_turns=result.num_turns, output_path=str(output_path),
@@ -156,9 +175,101 @@ class Critic:
             except proc.CommandError as exc:
                 log.warning("%s: could not record reviewed commit: %s", pr.ref, exc)
             self.clear_request_labels(pr, repo)
+        elif mode == FINDINGS and not result.is_error:
+            log.error("%s: %s", pr.ref, error)
         else:
             log.error("%s: claude reported an error: %s", pr.ref, error)
         return Outcome(pr, status, error or "", output_path)
+
+    def review_rules(self, pr: PullRequest, repo: RepoConfig, mode: str) -> str:
+        """The review's CLAUDE.md: severities, REVIEW.md from the default branch, configured guidelines."""
+        repo_rules = self.ws.default_file(pr.repo, "REVIEW.md") if repo.review.review_md else None
+        guidelines = ""
+        if repo.review.guidelines:
+            try:
+                guidelines = Path(repo.review.guidelines).read_text()
+            except OSError as exc:
+                raise ReviewError(f"review guidelines: {exc}") from None
+        if repo_rules:
+            log.info("%s: following REVIEW.md from the default branch", pr.ref)
+        return review_rules(mode, scale=SCALES[repo.review.severities], min_severity=repo.review.min_severity,
+                            repo_rules=repo_rules or "", guidelines=guidelines)
+
+    def publish(self, pr: PullRequest, repo: RepoConfig, text: str | None, diff: str, output_path: Path,
+                post: bool) -> tuple[str, str | None]:
+        """Check claude's findings and (if ``post``) post them as one review; returns (status, error).
+
+        Nothing is posted unless every finding has a path, a line and a recognised severity.
+        """
+        stem = output_path.with_suffix("")
+        if text is None:
+            return FAILED, f"claude wrote no {FINDINGS_FILE} (and no findings JSON in its reply); nothing posted"
+        scale = SCALES[repo.review.severities]
+        try:
+            summary, findings = parse_findings(text, scale)
+        except FindingsError as exc:
+            stem.with_name(stem.name + ".findings-rejected.json").write_text(text)
+            return FAILED, f"findings rejected, nothing posted: {exc}"
+        review = build_review(summary, findings, commentable_lines(diff), pr.head_sha, repo.review.min_severity,
+                              scale=scale)
+        self.save_review(output_path, review)
+        what = counts(review.inline + review.outside, scale) if findings else "no findings"
+        if not post:
+            log.info("%s: %s (not posted)", pr.ref, what)
+            return DONE, None
+        if self.claude_posted(pr, repo):
+            return ATTENTION, ("claude posted to the PR itself although posting = \"rocket-critic\"; not posting "
+                               "its findings as well (see the run output), use `review --force` to redo")
+        self.state.set_phase(pr.repo, pr.number, pr.head_sha, PHASE_POST)
+        try:
+            poster = self.poster(repo)
+            try:
+                poster.post_review(pr.repo, pr.number, review.payload)
+            except proc.CommandError as exc:
+                if not review.payload["comments"] or "HTTP 422" not in f"{exc} {exc.stderr}":
+                    raise  # anything but a refusal may have posted; the retry check sorts it out
+                # GitHub rejects the whole review (HTTP 422) if it can't place one comment; nothing was posted.
+                log.warning("%s: GitHub refused the inline comments (%s); listing them in the review body",
+                            pr.ref, exc)
+                review = build_review(summary, findings, {}, pr.head_sha, repo.review.min_severity, inline=False,
+                                      scale=scale)
+                self.save_review(output_path, review)
+                poster.post_review(pr.repo, pr.number, review.payload)
+        except (proc.CommandError, GitHubAppError) as exc:
+            return FAILED, f"could not post the review: {exc}"
+        log.info("%s: posted %d inline comment(s), %d in the review body: %s", pr.ref, len(review.inline),
+                 len(review.outside), what)
+        return DONE, None
+
+    @staticmethod
+    def save_review(output_path: Path, review: Review) -> None:
+        """Keep the review next to claude's output: as JSON, and appended to the readable output."""
+        stem = output_path.with_suffix("")
+        stem.with_name(stem.name + ".review.json").write_text(json.dumps(review.to_json(), indent=2) + "\n")
+        text = output_path.read_text().split("\n\n---\n\n## Review posted by rocket-critic", 1)[0]
+        parts = [text.rstrip(), "## Review posted by rocket-critic", review.payload["body"]]
+        for c in review.payload["comments"]:
+            lines = f"{c['start_line']}-{c['line']}" if "start_line" in c else str(c["line"])
+            parts.append(f"`{c['path']}:{lines}`\n\n{c['body']}")
+        output_path.write_text(parts[0] + "\n\n---\n\n" + "\n\n".join(parts[1:]) + "\n")
+
+    def claude_posted(self, pr: PullRequest, repo: RepoConfig) -> bool:
+        """Whether claude posted to the PR during this review although rocket-critic posts.
+
+        With a GitHub App its token is read-only, so it can't have; a user token can write,
+        and claude posts as the same identity rocket-critic would.
+        """
+        if self.uses_app(repo):
+            return False
+        rec = self.state.get(pr.repo, pr.number, pr.head_sha)
+        login = self.identity(repo)
+        if rec is None or rec.started_at is None or not login:
+            return False
+        try:
+            return self.gh.posted_since(pr.repo, pr.number, login, rec.started_at)
+        except (proc.CommandError, ValueError) as exc:
+            log.warning("%s: could not check whether claude posted: %s", pr.ref, exc)
+            return False
 
     def rereview_context(self, pr: PullRequest, repo: RepoConfig, last_sha: str) -> str:
         """Context for re-reviewing ``pr`` after an earlier review at ``last_sha``."""
@@ -213,7 +324,8 @@ class Critic:
         None: could not tell right now; try again next poll.
         """
         rec = self.state.get(pr.repo, pr.number, pr.head_sha)
-        if rec is None or rec.phase != PHASE_REVIEW or not repo.review.comment or rec.started_at is None:
+        if rec is None or rec.phase not in (PHASE_REVIEW, PHASE_POST) or not repo.review.comment \
+                or rec.started_at is None:
             return True
         login = self.identity(repo)
         posted = None
@@ -450,3 +562,11 @@ def running_pid(workdir: Path) -> int | None:
             return int(text) if text.isdigit() else -1  # held, PID not written yet
         fcntl.flock(fh, fcntl.LOCK_UN)
         return None
+
+
+def read_findings(scratch: Path, result: ReviewResult) -> str | None:
+    """What claude wrote to the findings file, or the findings JSON in its reply if it printed it."""
+    try:
+        return (scratch / FINDINGS_FILE).read_text()
+    except OSError:
+        return extract_json(result.text)

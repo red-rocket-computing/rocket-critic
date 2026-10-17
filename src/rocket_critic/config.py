@@ -17,8 +17,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .findings import SCALES
+
 LEVELS = ("low", "medium", "high", "xhigh", "max")
 LABEL_MODES = ("sticky", "request")
+POSTING_MODES = ("claude", "rocket-critic")
 MIN_POLL_INTERVAL = 10  # seconds
 
 CONFIG_NAME = "config.toml"
@@ -117,6 +120,13 @@ class ReviewConfig:
     max_reviews_per_pr: int = 5
     settle_seconds: int = 0
     incremental: bool = True
+    # Who posts the review: "claude" (/code-review --comment) or "rocket-critic", which has
+    # claude write its findings to a file, checks each one's severity and posts them itself.
+    posting: str = "claude"
+    severities: str = "code-review"  # severity scale: "code-review" or "traditional"
+    min_severity: str = ""  # leave out findings less severe than this level ("" = post all)
+    review_md: bool = True  # follow REVIEW.md from the repo's default branch
+    guidelines: str = ""  # a Markdown file of extra review rules
 
 
 @dataclass
@@ -228,6 +238,14 @@ def load(path: Path | None = None, workdir: Path | None = None) -> Settings:
     app = settings.github_app
     if app and not app.private_key.is_absolute():
         app.private_key = (path.parent / app.private_key).resolve()
+    for name, review in [("review", settings.review)] + [(f"repos.{r.name}.review", r.review) for r in settings.repos]:
+        if review.guidelines:
+            guidelines = Path(review.guidelines).expanduser()
+            if not guidelines.is_absolute():
+                guidelines = (path.parent / guidelines).resolve()
+            if not guidelines.is_file():
+                raise ConfigError(f"{path}: {name}.guidelines: no such file: {guidelines}")
+            review.guidelines = str(guidelines)
     if workdir:
         settings.workdir = Path(workdir).expanduser().resolve()
     elif not settings.workdir.is_absolute():
@@ -361,6 +379,18 @@ def _review(raw: dict[str, Any], where: str) -> ReviewConfig:
                                 minimum=0)
     r.settle_seconds = _int(raw.pop("settle_seconds", r.settle_seconds), f"{where}.settle_seconds", minimum=0)
     r.incremental = _bool(raw.pop("incremental", r.incremental), f"{where}.incremental")
+    r.posting = _str(raw.pop("posting", r.posting), f"{where}.posting")
+    if r.posting not in POSTING_MODES:
+        raise ConfigError(f"{where}.posting must be one of {', '.join(POSTING_MODES)}")
+    r.severities = _str(raw.pop("severities", r.severities), f"{where}.severities")
+    if r.severities not in SCALES:
+        raise ConfigError(f"{where}.severities must be one of {', '.join(SCALES)}")
+    r.min_severity = _str(raw.pop("min_severity", r.min_severity), f"{where}.min_severity")
+    if r.min_severity and r.min_severity not in SCALES[r.severities].keys:
+        raise ConfigError(f"{where}.min_severity must be \"\" or one of {', '.join(SCALES[r.severities].keys)} "
+                          f"(the {r.severities} severities)")
+    r.review_md = _bool(raw.pop("review_md", r.review_md), f"{where}.review_md")
+    r.guidelines = _str(raw.pop("guidelines", r.guidelines), f"{where}.guidelines")
     if raw:
         raise ConfigError(f"{where}: unknown keys: {', '.join(sorted(raw))}")
     return r

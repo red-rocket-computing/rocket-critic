@@ -10,6 +10,8 @@ from . import proc
 
 log = logging.getLogger(__name__)
 
+DEFAULT_REF = "refs/rocket-critic/default"
+
 
 class Workspace:
     def __init__(self, workdir: Path, git: str = "git", remote_base: str = "https://github.com/"):
@@ -56,7 +58,8 @@ class Workspace:
     def checkout(self, repo: str, number: int, head_sha: str, base_ref: str) -> Path:
         """Fetch PR ``number`` and its base branch, and add a worktree at ``head_sha``."""
         bare = self.ensure_clone(repo)
-        refspecs = [f"+refs/pull/{number}/head:refs/rocket-critic/pr/{number}"]
+        # The default branch too: REVIEW.md is read from there, never from the PR.
+        refspecs = [f"+refs/pull/{number}/head:refs/rocket-critic/pr/{number}", f"+HEAD:{DEFAULT_REF}"]
         if base_ref:
             refspecs.append(f"+refs/heads/{base_ref}:refs/remotes/origin/{base_ref}")
         self._git("fetch", "--quiet", "origin", *refspecs, cwd=bare)
@@ -67,6 +70,17 @@ class Workspace:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._git("worktree", "add", "--force", "--detach", str(path), head_sha, cwd=bare)
         return path
+
+    def default_file(self, repo: str, path: str) -> str | None:
+        """``path`` as it is on the default branch (as of the last checkout), or None if absent."""
+        res = proc.run([self.git, "show", f"{DEFAULT_REF}:{path}"], cwd=self.bare_path(repo), timeout=300,
+                       check=False)
+        return res.stdout if res.returncode == 0 else None
+
+    def diff(self, worktree: Path, base_ref: str) -> str:
+        """The pull request's diff as GitHub shows it: the merge base with ``base_ref`` to HEAD."""
+        return self._git("-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "-U3",
+                         f"refs/remotes/origin/{base_ref}...HEAD", cwd=worktree, timeout=300)
 
     def mark_reviewed(self, repo: str, number: int, head_sha: str) -> None:
         """Keep the last reviewed commit reachable so later reviews can diff against it."""

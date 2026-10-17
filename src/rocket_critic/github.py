@@ -80,8 +80,9 @@ class GitHub:
         self.gh = gh
         self.env = env
 
-    def _run(self, *args: str, env: Mapping[str, str] | None = None) -> str:
-        return proc.run([self.gh, *args], env=env if env is not None else self.env, timeout=120).stdout
+    def _run(self, *args: str, env: Mapping[str, str] | None = None, input: str | None = None) -> str:
+        return proc.run([self.gh, *args], env=env if env is not None else self.env, input=input,
+                        timeout=120).stdout
 
     def _json(self, *args: str, env: Mapping[str, str] | None = None) -> Any:
         out = self._run(*args, env=env)
@@ -182,6 +183,15 @@ class GitHub:
     def react(self, repo: str, comment_id: int, content: str) -> None:
         """Add a reaction (e.g. "eyes", "confused") to an issue/PR comment."""
         self._run("api", "-X", "POST", f"repos/{repo}/issues/comments/{comment_id}/reactions", "-f", f"content={content}")
+
+    def post_review(self, repo: str, number: int, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Post a pull request review (body, event and inline comments) in one request."""
+        out = self._run("api", "--method", "POST", f"repos/{repo}/pulls/{number}/reviews", "--input", "-",
+                        input=json.dumps(payload))
+        try:
+            return json.loads(out) if out.strip() else {}
+        except ValueError:
+            return {}  # posted; the reply is only informational
 
     def remove_label(self, repo: str, number: int, label: str) -> None:
         self._run("api", "-X", "DELETE", f"repos/{repo}/issues/{number}/labels/{quote(label, safe='')}")

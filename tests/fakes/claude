@@ -15,6 +15,13 @@ record = {
     "env": {k: v for k, v in os.environ.items() if k.startswith(("ANTHROPIC_", "GH_", "CLAUDE_"))},
     "head": subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip(),
 }
+scratch = sys.argv[sys.argv.index("--add-dir") + 1] if "--add-dir" in sys.argv else None
+if scratch and os.path.exists(os.path.join(scratch, "CLAUDE.md")):
+    record["rules"] = open(os.path.join(scratch, "CLAUDE.md")).read()
+if scratch and os.environ.get("FAKE_CLAUDE_FINDINGS"):
+    # Simulate claude writing its findings file (posting = "rocket-critic").
+    with open(os.path.join(scratch, "findings.json"), "w") as fh:
+        fh.write(open(os.environ["FAKE_CLAUDE_FINDINGS"]).read())
 with open(os.environ["FAKE_CLAUDE_LOG"], "a") as fh:
     fh.write(json.dumps(record) + "\n")
 
