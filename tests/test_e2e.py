@@ -1197,5 +1197,33 @@ def test_update_restarts_the_watcher(daemon_env, upd):
     assert res.exit_code == 0, res.output
     new = running_pid(env.workdir)
     assert new and new != old and f"started rocket-critic (pid {new})" in res.output
-    from rocket_critic.updater import watcher_argv
-    assert watcher_argv(new)[-3:] == ["watch", "--interval", "10"]  # started the same way as before
+    from rocket_critic.updater import started_by_start
+    assert started_by_start(new)[-3:] == ["watch", "--interval", "10"]  # started the same way as before
+
+
+def test_update_leaves_a_watcher_it_did_not_start(upd, tmp_path):
+    """A watcher run some other way (systemd unit, terminal) is not restarted by `update`."""
+    import subprocess
+    import sys
+
+    from rocket_critic.poller import running_pid
+
+    env = upd
+    log = open(tmp_path / "fg.log", "w")
+    # Like the systemd unit: the rocket-critic script in the foreground, no ROCKET_CRITIC_DAEMON.
+    script = [sys.executable, "-c", "import sys; from rocket_critic.cli import main; sys.argv[0] = 'rocket-critic'; main()"]
+    child_env = {k: v for k, v in os.environ.items() if k != "ROCKET_CRITIC_DAEMON"}
+    child = subprocess.Popen([*script, "-c", str(env.config), "watch", "--interval", "10s"], stdout=log,
+                             stderr=subprocess.STDOUT, env=child_env)
+    try:
+        wait_for(lambda: running_pid(env.workdir) == child.pid, what="foreground watcher")
+        upd.add_release("9.0.0")
+        res = env.run("update")
+        assert res.exit_code == 0 and "restart it the way it was started" in res.output
+        upd.add_release("9.0.1")
+        res = env.run("update", "--restart")
+        assert res.exit_code != 0 and "isn't restarted here" in res.output
+        assert running_pid(env.workdir) == child.pid and child.poll() is None
+    finally:
+        child.terminate()
+        child.wait(timeout=30)

@@ -49,8 +49,10 @@ rocket-critic update --restart   # install it, then restart the background watch
 `update` finds the latest release with your `gh` login, so it works for a private repository too. It
 downloads the release's wheel, checks it against the release's `SHA256SUMS`, and installs it into the
 environment rocket-critic runs from: with `pipx install --force` for a pipx install, otherwise with that
-environment's pip. Without `--restart`, it tells you how to restart a running watcher. A watcher started
-by systemd is restarted with `systemctl --user restart rocket-critic`, not by `update`.
+environment's pip. `--restart` then restarts a background watcher that `rocket-critic start` launched,
+with the same options. A watcher run another way (a systemd unit, a terminal) is left alone, and `update`
+says how to restart it, e.g. `systemctl --user restart rocket-critic`. So is one that a version without
+`update` started: restart that one yourself once, with `rocket-critic stop && rocket-critic start`.
 
 `--version X.Y.Z` installs a specific release, which can be older than the current one. `--force` reinstalls
 the current version. `update` won't replace a source checkout (`pip install -e`); use `git pull` there.

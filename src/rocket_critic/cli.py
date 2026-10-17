@@ -509,20 +509,20 @@ def restart_watcher(ctx: Ctx, restart: bool, old_version: str) -> None:
         if restart:
             click.echo(f"no background watcher is running for {workdir}")
         return
-    systemd = updater.under_systemd(pid)
-    if not restart:
-        how = ("`systemctl --user restart rocket-critic` (or `sudo systemctl restart rocket-critic`)" if systemd
-               else "`rocket-critic stop && rocket-critic start`")
-        click.echo(f"the background watcher (pid {pid}) still runs {old_version}; restart it with {how}")
+    argv = updater.started_by_start(pid)
+    if argv is None:
+        how = ("restart it the way it was started: `systemctl --user restart rocket-critic` for a systemd "
+               "service, Ctrl-C and `rocket-critic watch` in a terminal, or `rocket-critic stop && rocket-critic "
+               "start` for a watcher an earlier version started in the background")
+        if restart:
+            raise click.ClickException(f"the watcher (pid {pid}) wasn't started by this version's "
+                                       f"`rocket-critic start`, so it isn't restarted here; {how}")
+        click.echo(f"the watcher (pid {pid}) still runs {old_version}; {how}")
         return
-    if systemd:
-        raise click.ClickException(f"the watcher (pid {pid}) was started by systemd; restart it with "
-                                   "`systemctl --user restart rocket-critic` (or `sudo systemctl restart "
-                                   "rocket-critic`)")
-    argv = updater.watcher_argv(pid)
-    if not argv:
-        raise click.ClickException(f"could not read how the watcher (pid {pid}) was started; restart it with "
-                                   "`rocket-critic stop && rocket-critic start`")
+    if not restart:
+        click.echo(f"the background watcher (pid {pid}) still runs {old_version}; restart it with "
+                   "`rocket-critic update --restart` or `rocket-critic stop && rocket-critic start`")
+        return
     click.echo(f"restarting the background watcher (pid {pid}); a review in progress finishes first")
     daemon.stop(workdir)
     try:

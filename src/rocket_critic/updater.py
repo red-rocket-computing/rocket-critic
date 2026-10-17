@@ -23,6 +23,7 @@ from pathlib import Path
 from . import proc
 
 RELEASE_REPO = "sgstreet/rocket-critic"
+DAEMON_ENV = "ROCKET_CRITIC_DAEMON"  # see daemon.start
 DIST_NAME = "rocket-critic"
 SUMS = "SHA256SUMS"
 
@@ -158,22 +159,18 @@ def install(wheel: Path, reinstall: bool = False) -> None:
         raise UpdateError(f"could not run {cmd[0]}") from None
 
 
-def watcher_argv(pid: int) -> list[str] | None:
-    """The rocket-critic arguments of the running watcher ``pid`` (from /proc), or None."""
-    try:
-        args = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0")
-    except OSError:
-        return None
-    args = [a for a in args if a]
-    if "rocket_critic" in args:
-        return args[args.index("rocket_critic") + 1:]
-    return None
+def started_by_start(pid: int) -> list[str] | None:
+    """The rocket-critic arguments of watcher ``pid`` if `rocket-critic start` launched it, else None.
 
-
-def under_systemd(pid: int) -> bool:
-    """Whether ``pid`` was started by systemd (which then restarts it, not rocket-critic)."""
+    Such a watcher runs as ``python -m rocket_critic ...`` with ROCKET_CRITIC_DAEMON=1 in its
+    environment. Anything else (a systemd unit, a terminal, or a watcher started by a version
+    before `update` existed) is left alone, to be restarted the way it was started.
+    """
     try:
+        args = [a for a in Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace").split("\0") if a]
         environ = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
     except OSError:
-        return False
-    return any(var.startswith(b"INVOCATION_ID=") for var in environ)
+        return None
+    if f"{DAEMON_ENV}=1".encode() not in environ or "-m" not in args or "rocket_critic" not in args:
+        return None
+    return args[args.index("rocket_critic") + 1:]
