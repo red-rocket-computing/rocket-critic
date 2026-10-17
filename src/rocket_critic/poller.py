@@ -226,9 +226,9 @@ class Critic:
             try:
                 poster.post_review(pr.repo, pr.number, review.payload)
             except proc.CommandError as exc:
-                if not review.payload["comments"]:
-                    raise
-                # GitHub rejects the whole review if it can't place one comment; nothing was posted.
+                if not review.payload["comments"] or "HTTP 422" not in f"{exc} {exc.stderr}":
+                    raise  # anything but a refusal may have posted; the retry check sorts it out
+                # GitHub rejects the whole review (HTTP 422) if it can't place one comment; nothing was posted.
                 log.warning("%s: GitHub refused the inline comments (%s); listing them in the review body",
                             pr.ref, exc)
                 review = build_review(summary, findings, {}, pr.head_sha, repo.review.min_severity, inline=False,

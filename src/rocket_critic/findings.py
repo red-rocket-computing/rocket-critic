@@ -7,6 +7,7 @@ finding must carry a recognised severity before anything is posted.
 
 from __future__ import annotations
 
+import codecs
 import json
 import re
 from dataclasses import asdict, dataclass
@@ -236,6 +237,13 @@ def _strip_label(text: str) -> str:
     return text
 
 
+def _unquote(path: str) -> str:
+    """A path as git prints it, without the C-style quoting it uses for unusual names."""
+    if len(path) < 2 or not (path.startswith('"') and path.endswith('"')):
+        return path
+    return codecs.escape_decode(path[1:-1].encode())[0].decode("utf-8", "replace")
+
+
 def commentable_lines(diff: str) -> dict[str, set[int]]:
     """Lines of each file that a review comment can be attached to: the new-side
     lines (added or context) shown in the diff's hunks.
@@ -273,7 +281,7 @@ def commentable_lines(diff: str) -> dict[str, set[int]]:
                 current.add(new_line)
             new_line += 1
         elif row.startswith("+++ "):
-            target = row[4:].rstrip("\t").strip()
+            target = _unquote(row[4:].rstrip("\t").strip())
             current = None if target == "/dev/null" else lines.setdefault(target.removeprefix("b/"), set())
     return lines
 

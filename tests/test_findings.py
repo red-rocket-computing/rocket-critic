@@ -189,3 +189,9 @@ def test_commentable_lines_added_line_that_looks_like_a_header():
     diff = ("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,4 @@\n x\n+++ y\n+z\n w\n"
             "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\t\n@@ -5 +5 @@\n-old\n+new\n")
     assert commentable_lines(diff) == {"a.py": {1, 2, 3, 4}, "b.py": {5}}
+
+
+def test_commentable_lines_quoted_paths():
+    diff = ('diff --git a/x b/x\n--- a/x\n+++ "b/dir/na\\303\\257ve \\"q\\".py"\n@@ -0,0 +1 @@\n+a\n'
+            "diff --git a/y b/y\n--- a/y\n+++ b/dir/naïve.py\n@@ -0,0 +1 @@\n+b\n")
+    assert commentable_lines(diff) == {'dir/na\u00efve "q".py': {1}, "dir/na\u00efve.py": {1}}

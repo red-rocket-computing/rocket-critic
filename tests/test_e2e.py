@@ -1044,3 +1044,25 @@ def test_traditional_severities(env, monkeypatch):
     assert "- \U0001F7E1 **Medium** (pre-existing) `lib.py:5`: Leaks a file" in payload["body"]
     assert "1 finding(s) less severe than \U0001F535 Low not posted." in payload["body"]
     assert "1 pre-existing" in payload["body"]
+
+
+def test_failed_post_is_not_retried_without_inline_comments(env, monkeypatch):
+    # Only GitHub refusing a comment's position (HTTP 422) means nothing was posted; any
+    # other error may have posted, so the review is not sent again in another form.
+    env.write_config(review='posting = "rocket-critic"')
+    monkeypatch.setenv("FAKE_CLAUDE_FINDINGS", str(findings_file(env, BUG)))
+    monkeypatch.setenv("FAKE_GH_POST_ERROR", "gh: Bad Gateway (HTTP 502)")
+    assert env.run("watch", "--once").exit_code == 0
+    rec = env.state().get("o/r", 1, env.pr_sha)
+    assert rec.status == FAILED and "could not post the review" in rec.error and "HTTP 502" in rec.error
+    assert rec.phase == "post"  # the retry first checks whether it was posted after all
+    posts = [c for c in env.gh_calls() if "POST" in c and c[3].endswith("/reviews")]
+    assert len(posts) == 1
+
+
+def test_non_json_reply_after_posting_is_fine(env, monkeypatch):
+    env.write_config(review='posting = "rocket-critic"')
+    monkeypatch.setenv("FAKE_CLAUDE_FINDINGS", str(findings_file(env, BUG)))
+    monkeypatch.setenv("FAKE_GH_POST_STDOUT", "not json")
+    assert env.run("review", "o/r#1").exit_code == 0
+    assert env.state().get("o/r", 1, env.pr_sha).status == DONE

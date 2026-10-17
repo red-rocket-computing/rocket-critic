@@ -79,8 +79,8 @@ class Workspace:
 
     def diff(self, worktree: Path, base_ref: str) -> str:
         """The pull request's diff as GitHub shows it: the merge base with ``base_ref`` to HEAD."""
-        return self._git("diff", "--no-color", "--no-ext-diff", "-U3", f"refs/remotes/origin/{base_ref}...HEAD",
-                         cwd=worktree, timeout=300)
+        return self._git("-c", "core.quotePath=false", "diff", "--no-color", "--no-ext-diff", "-U3",
+                         f"refs/remotes/origin/{base_ref}...HEAD", cwd=worktree, timeout=300)
 
     def mark_reviewed(self, repo: str, number: int, head_sha: str) -> None:
         """Keep the last reviewed commit reachable so later reviews can diff against it."""

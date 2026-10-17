@@ -78,6 +78,9 @@ if args[0] == "api" and route.endswith("/reviews") and "POST" in args:
     if payload.get("comments") and os.environ.get("FAKE_GH_REJECT_INLINE"):
         print("gh: Unprocessable Entity (HTTP 422): Line could not be resolved", file=sys.stderr)
         sys.exit(1)
+    if os.environ.get("FAKE_GH_POST_ERROR"):
+        print(os.environ["FAKE_GH_POST_ERROR"], file=sys.stderr)
+        sys.exit(1)
     import time
     login = data.get("logins", {}).get(os.environ.get("GH_TOKEN", ""), data.get("login"))
     review = {"id": len(data.get("reviews", [])) + 1, "user": {"login": login}, "commit_id": payload.get("commit_id"),
@@ -86,6 +89,9 @@ if args[0] == "api" and route.endswith("/reviews") and "POST" in args:
     data.setdefault("posted_reviews", []).append({"pr": int(route.split("/")[-2]), "payload": payload,
                                                   "token": os.environ.get("GH_TOKEN", "")})
     save()
+    if os.environ.get("FAKE_GH_POST_STDOUT"):
+        print(os.environ["FAKE_GH_POST_STDOUT"])
+        sys.exit(0)
     out(review)
 if args[0] == "api" and route.endswith("/reviews"):
     pages(data.get("reviews", []))

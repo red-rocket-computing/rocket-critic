@@ -269,8 +269,9 @@ With `posting = "rocket-critic"`, rocket-critic posts the review itself and chec
    review body with their `path:line`, under a count of findings by severity. If GitHub still refuses
    a comment's position, every finding goes in the body instead.
 
-In this mode Claude can't post: `gh api` is left out of its allowed tools, and with a GitHub App its
-token is read-only. With a user token, rocket-critic also checks that nothing was posted during the run
+In this mode Claude can't post: `gh api`, `gh pr review` and `gh pr comment` are denied (a deny rule,
+so a broader allow such as `Bash(gh:*)` doesn't reopen them), and with a GitHub App its token is
+read-only. With a user token, rocket-critic also checks that nothing was posted during the run
 before posting, and marks the commit `attention` if something was. `review --no-comment` saves the
 checked review (`WORKDIR/runs/OWNER/REPO/N/SHA.review.json`, and the run's `.md` output) without posting
 it.

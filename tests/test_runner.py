@@ -158,6 +158,12 @@ def test_rocket_critic_posting_prompt_and_command(tmp_path):
     cmd = build_command("p", s.claude, scratch=tmp_path, read_only_github=True)
     allowed = cmd[cmd.index("--allowedTools") + 1].split(",")
     assert not any(t.startswith("Bash(gh api") for t in allowed) and "Bash(gh pr diff:*)" in allowed
+    # Denied too, so a broader allow such as Bash(gh:*) can't let it through.
+    c = cfg(posting="rocket-critic").claude
+    c.allowed_tools = ["Read", "Bash(gh:*)"]
+    denied = build_command("p", c, scratch=tmp_path, read_only_github=True)
+    denied = denied[denied.index("--disallowedTools") + 1].split(",")
+    assert {"Bash(gh api:*)", "Bash(gh pr review:*)", "Bash(gh pr comment:*)"} <= set(denied)
 
 
 def test_review_rules():

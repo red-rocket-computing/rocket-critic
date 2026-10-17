@@ -40,6 +40,8 @@ MAX_GUIDELINES_CHARS = 20_000
 # findings claude writes to a file; or nothing is posted.
 POST, FINDINGS, NO_POST = "post", "findings", "none"
 RULES_FILE = "CLAUDE.md"
+# Denied when rocket-critic posts: the gh commands that can write to a pull request.
+GH_WRITE_DENY = ["Bash(gh api:*)", "Bash(gh pr review:*)", "Bash(gh pr comment:*)"]
 # Makes claude load CLAUDE.md from --add-dir directories (the scratch directory).
 RULES_ENV = {"CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD": "1"}
 
@@ -243,9 +245,11 @@ def build_command(prompt: str, claude: ClaudeConfig, scratch: Path | None = None
     """The claude command line. With ``scratch``, writes are allowed in that directory only.
     ``read_only_github`` drops ``gh api`` (which can write) from the allowed tools."""
     allowed = list(claude.allowed_tools)
+    disallowed = list(claude.disallowed_tools)
     if read_only_github:
         allowed = [t for t in allowed if not t.replace(" ", "").startswith("Bash(ghapi")]
-    disallowed = list(claude.disallowed_tools)
+        # A deny rule also beats broader allows such as Bash(gh:*).
+        disallowed += [t for t in GH_WRITE_DENY if t not in disallowed]
     if scratch is not None:
         allowed.append(scratch_rule(scratch))
         # A bare Edit/Write deny would override the scoped allow; dontAsk refuses

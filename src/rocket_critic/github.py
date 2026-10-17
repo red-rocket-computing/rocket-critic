@@ -188,7 +188,10 @@ class GitHub:
         """Post a pull request review (body, event and inline comments) in one request."""
         out = self._run("api", "--method", "POST", f"repos/{repo}/pulls/{number}/reviews", "--input", "-",
                         input=json.dumps(payload))
-        return json.loads(out) if out.strip() else {}
+        try:
+            return json.loads(out) if out.strip() else {}
+        except ValueError:
+            return {}  # posted; the reply is only informational
 
     def remove_label(self, repo: str, number: int, label: str) -> None:
         self._run("api", "-X", "DELETE", f"repos/{repo}/issues/{number}/labels/{quote(label, safe='')}")
