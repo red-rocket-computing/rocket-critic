@@ -23,11 +23,25 @@ poll (gh api …/pulls) → filter → git worktree at PR head → claude -p "/c
 
 ## Install
 
+The newest release, always from the same link:
+
 ```sh
-pipx install git+https://github.com/sgstreet/rocket-critic
-# or, from a checkout:
-pip install -e '.[dev]'
+pipx install https://github.com/sgstreet/rocket-critic/releases/latest/download/rocket-critic.tar.gz
 ```
+
+Run the same command with `--force` to upgrade an existing install. If the repository is private, download
+the archive with your `gh` login first:
+
+```sh
+gh release download -R sgstreet/rocket-critic -p rocket-critic.tar.gz -D /tmp/rc --clobber
+pipx install --force /tmp/rc/rocket-critic.tar.gz
+```
+
+A specific release is at `releases/download/vX.Y.Z/`, as a wheel (`rocket_critic-X.Y.Z-py3-none-any.whl`) or
+source archive. From a checkout: `pip install -e '.[dev]'`.
+
+After upgrading, restart a background watcher so it runs the new code: `rocket-critic stop && rocket-critic
+start`, or `systemctl --user restart rocket-critic`.
 
 ## Quick start
 
@@ -686,8 +700,8 @@ The workflow then:
 - runs the [CI workflow](.github/workflows/ci.yml): tests on Python 3.11–3.13, lint, wheel check;
 - builds the wheel and source archive and checks that the wheel installs and runs;
 - creates the tag if the run was started by hand for a new one;
-- creates a GitHub release with generated notes, the two files and `SHA256SUMS`. Tags with a suffix become
-  pre-releases.
+- creates a GitHub release with generated notes, the wheel, the source archive, a version-less copy of the
+  archive (`rocket-critic.tar.gz`) and `SHA256SUMS`. Tags with a suffix become pre-releases.
 
 If a release for the tag already exists, for example because it was created on GitHub's **Draft a new
 release** page, the workflow attaches the files to it and keeps its title and notes. A draft stays a draft
@@ -698,10 +712,13 @@ Other ways to run the workflow by hand:
   it. Use this to add the files to a release that has none;
 - with **tag** empty, it checks, tests and builds the selected branch without publishing anything.
 
-To install a release:
+`https://github.com/sgstreet/rocket-critic/releases/latest/download/rocket-critic.tar.gz` always points at
+the newest release; GitHub's "latest" skips drafts and pre-releases. The copy has no version in its name
+because a link to a fixed name is what makes it stable. Only the source archive can do this: pip rejects
+a wheel whose file name has no version. To install a specific release:
 
 ```sh
-pipx install https://github.com/sgstreet/rocket-critic/releases/download/v0.2.0/rocket_critic-0.2.0-py3-none-any.whl
+pipx install https://github.com/sgstreet/rocket-critic/releases/download/v0.3.0/rocket_critic-0.3.0-py3-none-any.whl
 ```
 
 ## License
