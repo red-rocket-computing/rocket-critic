@@ -128,7 +128,8 @@ class Critic:
             rules = self.review_rules(pr, repo, mode)
             self.state.set_phase(pr.repo, pr.number, pr.head_sha, PHASE_REVIEW)
             result = run_review(worktree, pr.repo, pr.number, repo.claude, repo.review, comment=comment,
-                                context=context, extra_env=extra_env, scratch=scratch, rules=rules)
+                                context=context, extra_env=extra_env, scratch=scratch, rules=rules,
+                                base_ref=pr.base_ref)
             if mode == FINDINGS and not result.is_error:
                 findings_text = read_findings(scratch, result)
                 try:

@@ -51,7 +51,7 @@ def posting_mode(review: ReviewConfig, comment: bool | None = None) -> str:
     return POST if (review.comment if comment is None else comment) else NO_POST
 
 
-def posting_notes(scratch: Path, mode: str = POST, scale: Scale = CODE_REVIEW) -> str:
+def posting_notes(scratch: Path, mode: str = POST, scale: Scale = CODE_REVIEW, base_ref: str = "") -> str:
     """How to run commands, and post or record findings, within rocket-critic's permissions."""
     lines = [
         "## Working notes (from rocket-critic)",
@@ -59,6 +59,10 @@ def posting_notes(scratch: Path, mode: str = POST, scale: Scale = CODE_REVIEW) -
         f"- Follow the review rules in {scratch}/{RULES_FILE} (severities, repository guidelines); read",
         "  it first if it is not already in your context.",
         "- The current directory is the pull request checkout: run git here, without `git -C`.",
+        "- Run one plain command at a time. Commands joined with `||`, `&&` or `;`, pipes and redirections",
+        "  (`2>/dev/null`) are denied; if a command is denied, try a simpler one rather than giving up.",
+        *([f"- The pull request's changes: `git diff origin/{base_ref}...HEAD` (and `git log "
+           f"origin/{base_ref}..HEAD`)."] if base_ref else []),
         "- Use the Read, Grep and Glob tools to look at files; `ls`, `grep`, `cat`, `head` and similar",
         "  shell commands are not available. Don't build, test or run the project (make, scripts,",
         "  package managers): that is blocked, so review by reading the code.",
@@ -158,7 +162,7 @@ def _cap(text: str) -> str:
 
 
 def review_prompt(number: int, review: ReviewConfig, *, comment: bool | None = None, context: str = "",
-                  scratch: Path | None = None) -> str:
+                  scratch: Path | None = None, base_ref: str = "") -> str:
     """The ``/code-review`` command line.
 
     Notes and re-review context go after the arguments: /code-review reads its
@@ -174,7 +178,7 @@ def review_prompt(number: int, review: ReviewConfig, *, comment: bool | None = N
         parts.append("--comment")
     sections = [" ".join(parts)]
     if scratch is not None:
-        sections.append(posting_notes(scratch, mode, scale))
+        sections.append(posting_notes(scratch, mode, scale, base_ref))
     if context:
         sections.append(context)
     return "\n\n".join(sections)
@@ -326,10 +330,11 @@ def run_review(
     extra_env: Mapping[str, str] | None = None,
     scratch: Path | None = None,
     rules: str = "",
+    base_ref: str = "",
 ) -> ReviewResult:
     """Run /code-review in ``worktree``. ``rules`` is written to ``scratch``/CLAUDE.md, which
     claude loads as memory (``scratch`` is an --add-dir directory)."""
-    prompt = review_prompt(number, review, comment=comment, context=context, scratch=scratch)
+    prompt = review_prompt(number, review, comment=comment, context=context, scratch=scratch, base_ref=base_ref)
     mode = posting_mode(review, comment)
     cmd = build_command(prompt, claude, scratch, read_only_github=mode == FINDINGS)
     extra = dict(extra_env or {})

@@ -132,6 +132,8 @@ def test_review_prompt_posting_notes(tmp_path):
     assert first == "/code-review 5 medium --comment"
     assert "without `git -C`" in text and f"{tmp_path}/comment-1.json" in text and "--input <file>" in text
     assert "Use the Read, Grep and Glob tools" in text and "Don't build, test or run the project" in text
+    assert "Run one plain command at a time" in text and "git diff origin/" not in text  # no base given
+    assert "`git diff origin/develop...HEAD`" in review_prompt(5, s.review, scratch=tmp_path, base_ref="develop")
     assert text.endswith("CTX")
     assert "Bash(echo:*)" in s.claude.allowed_tools and "Bash(git remote -v)" in s.claude.allowed_tools
 

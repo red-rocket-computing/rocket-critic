@@ -170,3 +170,22 @@ def test_traditional_scale():
     review = build_review("", findings, commentable_lines(DIFF), "abc", min_severity="high", scale=TRADITIONAL)
     assert [c["body"].split(":")[0] for c in review.payload["comments"]] == ["\U0001F7E0 **High**"]
     assert "1 finding(s) less severe than \U0001F7E0 High not posted." in review.payload["body"]
+
+
+def test_titles_starting_with_severity_words_are_kept():
+    # Found by rocket-critic reviewing its own PR: a bare name prefix was stripped.
+    (a, b, c, d, e) = parse_findings(doc(
+        item(title="Information leak in logs"), item(title="Highlighted rows are dropped"),
+        item(title="Low-level retry never stops"), item(title="Important config is ignored"),
+        item(title="Nit - naming", body="**Nit**: body text"),
+    ))[1]
+    assert [a.title, b.title, c.title, d.title] == ["Information leak in logs", "Highlighted rows are dropped",
+                                                    "Low-level retry never stops", "Important config is ignored"]
+    assert e.title == "naming" and e.body == "body text"
+
+
+def test_commentable_lines_added_line_that_looks_like_a_header():
+    # Found by rocket-critic reviewing its own PR: "+++ y" is an added line "++ y", not a header.
+    diff = ("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,4 @@\n x\n+++ y\n+z\n w\n"
+            "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\t\n@@ -5 +5 @@\n-old\n+new\n")
+    assert commentable_lines(diff) == {"a.py": {1, 2, 3, 4}, "b.py": {5}}

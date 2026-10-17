@@ -102,10 +102,13 @@ SCALES = {scale.name: scale for scale in (CODE_REVIEW, TRADITIONAL)}
 # A severity label the model put at the start of a title or body; rocket-critic adds its own.
 _MARKERS = sorted({lvl.marker for scale in SCALES.values() for lvl in scale.levels}, key=len, reverse=True)
 _NAMES = sorted({lvl.name.lower() for scale in SCALES.values() for lvl in scale.levels}, key=len, reverse=True)
+# The parts of a severity label: the name must be a whole word, and only counts as a
+# label when a marker, bold or a separator says so ("Information leak", "Low-level
+# retry" and "Important config is ignored" are titles, not labels).
 _LEADING_LABEL = re.compile(
-    r"^\s*(?:(?:" + "|".join(map(re.escape, _MARKERS)) + r")️?\s*)?(?:\*\*)?\s*(?:"
-    + "|".join(map(re.escape, _NAMES)) + r")\s*(?:\*\*)?\s*(?:\(pre-existing\)\s*)?(?:[:\-–—]\s*)?"
-    r"(?:\*\*)?\s*",
+    r"^\s*(?P<marker>" + "|".join(map(re.escape, _MARKERS)) + r")?️?\s*(?P<open>\*\*)?\s*(?:"
+    + "|".join(map(re.escape, _NAMES)) + r")\b(?P<close>\s*\*\*)?\s*(?P<pre>\(pre-existing\))?\s*"
+    r"(?P<sep>:|[\-–—](?=\s))?(?P<after>\s*\*\*)?\s*",
     re.I,
 )
 _FENCED_JSON = re.compile(r"```(?:json)?\s*\n(.*?)\n```", re.S)
@@ -225,32 +228,53 @@ def _int(value: Any) -> int | None:
 
 
 def _strip_label(text: str) -> str:
-    return _LEADING_LABEL.sub("", text.strip(), count=1).strip()
+    """``text`` without a severity label the model put in front ("🟡 **Nit**: ...")."""
+    text = text.strip()
+    m = _LEADING_LABEL.match(text)
+    if m and (m["marker"] or (m["open"] and (m["close"] or m["after"])) or m["sep"]):
+        return text[m.end():].strip()
+    return text
 
 
 def commentable_lines(diff: str) -> dict[str, set[int]]:
     """Lines of each file that a review comment can be attached to: the new-side
-    lines (added or context) shown in the diff's hunks."""
+    lines (added or context) shown in the diff's hunks.
+
+    Hunk lengths come from the ``@@`` headers, so an added line that itself starts
+    with ``++ `` (shown as ``+++ ...``) is never taken for a file header.
+    """
     lines: dict[str, set[int]] = {}
     current: set[int] | None = None
-    new_line = 0
+    new_line = old_left = new_left = 0
     for row in diff.splitlines():
+        # Inside a hunk every row starts with "+", "-", " " or a backslash, so these two are always headers.
         if row.startswith("diff --git "):
             current = None
-        elif row.startswith("+++ "):
-            target = row[4:].strip()
-            current = None if target == "/dev/null" else lines.setdefault(target.removeprefix("b/"), set())
+            old_left = new_left = 0
         elif row.startswith("@@"):
-            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", row)
-            new_line = int(m.group(1)) if m else 0
-        elif current is not None and new_line:
-            if row.startswith("+"):
+            m = re.match(r"@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", row)
+            if m:
+                old_left = int(m.group(1) or 1)
+                new_line = int(m.group(2))
+                new_left = int(m.group(3) or 1)
+        elif old_left > 0 or new_left > 0:
+            tag = row[:1]
+            if tag == "-":
+                old_left -= 1
+                continue
+            if tag == "+":
+                new_left -= 1
+            elif tag in (" ", ""):
+                old_left -= 1
+                new_left -= 1
+            else:  # "\ No newline at end of file"
+                continue
+            if current is not None:
                 current.add(new_line)
-                new_line += 1
-            elif row.startswith(" ") or row == "":
-                current.add(new_line)
-                new_line += 1
-            # "-" rows and "\ No newline at end of file" don't advance the new side.
+            new_line += 1
+        elif row.startswith("+++ "):
+            target = row[4:].rstrip("\t").strip()
+            current = None if target == "/dev/null" else lines.setdefault(target.removeprefix("b/"), set())
     return lines
 
 

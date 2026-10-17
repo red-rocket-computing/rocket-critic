@@ -171,6 +171,7 @@ def test_review_one_pr(env):
     assert scratch.parent == env.workdir / "runs" / "o" / "r" / "1" and scratch.name.startswith("scratch-")
     assert f"Edit(/{scratch}/**)" in call["argv"][call["argv"].index("--allowedTools") + 1].split(",")
     assert f"Write tool to a new file in {scratch}/" in call["argv"][1]
+    assert "`git diff origin/main...HEAD`" in call["argv"][1]
     assert not scratch.exists()
     assert call["head"] == env.pr_sha
     assert Path(call["cwd"]).is_relative_to(env.workdir / "prs" / "o" / "r")
