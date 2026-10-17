@@ -17,6 +17,8 @@ from .poller import running_pid
 log = logging.getLogger(__name__)
 
 LOG_NAME = "rocket-critic.log"
+# Set in the environment of a watcher started by `start`, so `update --restart` knows it may restart it.
+DAEMON_ENV = "ROCKET_CRITIC_DAEMON"
 
 
 class ConfigWatcher:
@@ -105,7 +107,7 @@ def start(argv: Sequence[str], workdir: Path, wait: float = 10.0) -> int:
         child = subprocess.Popen(
             [sys.executable, "-m", "rocket_critic", *argv],
             stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-            cwd=workdir, start_new_session=True,
+            cwd=workdir, start_new_session=True, env={**os.environ, DAEMON_ENV: "1"},
         )
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
