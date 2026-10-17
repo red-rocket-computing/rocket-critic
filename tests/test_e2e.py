@@ -1227,3 +1227,118 @@ def test_update_leaves_a_watcher_it_did_not_start(upd, tmp_path):
     finally:
         child.terminate()
         child.wait(timeout=30)
+
+
+# -- service ----------------------------------------------------------------------
+
+@pytest.fixture
+def svc(env, monkeypatch, tmp_path):
+    """Fake systemctl/loginctl, and a private XDG config dir for the unit file."""
+    env.systemd_log = tmp_path / "systemd.log"
+    monkeypatch.setenv("FAKE_SYSTEMD_LOG", str(env.systemd_log))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    env.unit = tmp_path / "xdg" / "systemd" / "user" / "rocket-critic.service"
+    env.systemd_calls = lambda: ([json.loads(x) for x in env.systemd_log.read_text().splitlines()]
+                                 if env.systemd_log.exists() else [])
+    return env
+
+
+def test_service_install_status_remove(svc, monkeypatch):
+    from rocket_critic import service
+
+    res = svc.run("service", "install", "--interval", "2m")
+    assert res.exit_code == 0, res.output
+    text = svc.unit.read_text()
+    assert text.startswith(service.MARKER)
+    exec_start = next(line for line in text.splitlines() if line.startswith("ExecStart="))
+    assert exec_start.endswith(f"-c {svc.config} watch --interval 120")
+    assert exec_start.split("=", 1)[1].split()[0].endswith("rocket-critic")
+    assert f"WorkingDirectory={svc.workdir}" in text
+    assert f"Environment={service.quote('PATH=' + os.environ['PATH'], command=False)}" in text
+    assert "KillMode=mixed" in text and "WantedBy=default.target" in text
+    calls = [c for c in svc.systemd_calls() if c[0] == "systemctl"]
+    assert ["systemctl", "--user", "daemon-reload"] in calls
+    assert calls.index(["systemctl", "--user", "enable", "rocket-critic.service"]) < \
+        calls.index(["systemctl", "--user", "restart", "rocket-critic.service"])
+    assert "stops when you log out" in res.output  # not lingering
+
+    monkeypatch.setenv("FAKE_SYSTEMD_MAINPID", "4242")
+    monkeypatch.setenv("FAKE_LINGER", "yes")
+    out = svc.run("service", "status").output
+    assert "rocket-critic: active (pid 4242), enabled" in out and "linger: yes" in out
+
+    res = svc.run("service", "remove")
+    assert res.exit_code == 0 and not svc.unit.exists()
+    assert ["systemctl", "--user", "disable", "--now", "rocket-critic.service"] in svc.systemd_calls()
+    assert "nothing to remove" in svc.run("service", "remove").output
+    assert "not installed" in svc.run("service", "status").output
+
+
+def test_service_install_options_and_foreign_units(svc):
+    res = svc.run("service", "install", "--name", "critic-work", "--no-start", "--linger", "--repo", "o/r")
+    assert res.exit_code == 0, res.output
+    unit = svc.unit.with_name("critic-work.service")
+    assert "watch --repo o/r" in unit.read_text()
+    calls = svc.systemd_calls()
+    assert ["loginctl", "enable-linger", __import__("getpass").getuser()] in calls
+    assert not any(c[:3] == ["systemctl", "--user", "restart"] for c in calls)
+
+    svc.unit.parent.mkdir(parents=True, exist_ok=True)
+    svc.unit.write_text("[Service]\nExecStart=/bin/true\n")  # someone else's unit
+    res = svc.run("service", "install")
+    assert res.exit_code != 0 and "wasn't written by `service install`" in res.output
+    assert svc.run("service", "remove").exit_code != 0 and svc.unit.exists()
+    assert svc.run("service", "install", "--force").exit_code == 0
+    assert svc.run("service", "install", "--name", "bad name").exit_code != 0
+
+
+def test_service_quoting():
+    from rocket_critic.service import quote
+
+    assert quote("/usr/bin/rocket-critic") == "/usr/bin/rocket-critic"
+    assert quote("/a b/c") == '"/a b/c"'
+    assert quote("100%") == "100%%" and quote("$HOME") == "$$HOME"
+    assert quote("PATH=/x:$y", command=False) == "PATH=/x:$y"
+    assert quote('say "hi"') == '"say \\"hi\\""'
+
+
+def test_service_install_takes_over_from_start(daemon_env, svc):
+    from rocket_critic.poller import running_pid
+
+    env = daemon_env
+    assert env.run("start", "--interval", "10s").exit_code == 0
+    pid = running_pid(env.workdir)
+    res = env.run("service", "install")
+    assert res.exit_code == 0, res.output
+    assert f"stopping the background watcher (pid {pid})" in res.output
+    assert running_pid(env.workdir) is None  # (the fake systemctl doesn't start anything)
+
+
+def test_update_restarts_the_service(upd, svc, tmp_path, monkeypatch):
+    """A watcher run by a unit from `service install` is restarted through systemctl."""
+    import subprocess
+    import sys
+
+    from rocket_critic.poller import running_pid
+
+    env = upd
+    log = open(tmp_path / "svc.log", "w")
+    script = [sys.executable, "-c", "import sys; from rocket_critic.cli import main; sys.argv[0] = 'rocket-critic'; main()"]
+    child = subprocess.Popen([*script, "-c", str(env.config), "watch", "--interval", "10s"], stdout=log,
+                             stderr=subprocess.STDOUT, env={k: v for k, v in os.environ.items()
+                                                            if k != "ROCKET_CRITIC_DAEMON"})
+    try:
+        wait_for(lambda: running_pid(env.workdir) == child.pid, what="service watcher")
+        monkeypatch.setenv("FAKE_SYSTEMD_MAINPID", str(child.pid))
+        assert env.run("service", "install", "--no-start").exit_code == 0  # it's the service: not stopped
+        assert child.poll() is None
+        upd.add_release("9.0.0")
+        res = env.run("update")
+        assert "the rocket-critic service (pid" in res.output and "systemctl --user restart rocket-critic" in res.output
+        upd.add_release("9.0.1")
+        res = env.run("update", "--restart")
+        assert res.exit_code == 0, res.output
+        assert ["systemctl", "--user", "restart", "rocket-critic.service"] in env.systemd_calls()
+    finally:
+        child.terminate()
+        child.wait(timeout=30)

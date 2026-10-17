@@ -14,7 +14,7 @@ from pathlib import Path
 
 import click
 
-from . import __version__, daemon, filters, proc, updater
+from . import __version__, daemon, filters, proc, service, updater
 from .config import (
     CONFIG_NAME,
     DEFAULT_CONFIG_PATH,
@@ -510,6 +510,19 @@ def restart_watcher(ctx: Ctx, restart: bool, old_version: str) -> None:
             click.echo(f"no background watcher is running for {workdir}")
         return
     argv = updater.started_by_start(pid)
+    unit = service.unit_for_pid(pid) if argv is None else None
+    if unit:
+        if not restart:
+            click.echo(f"the {unit} service (pid {pid}) still runs {old_version}; restart it with "
+                       f"`rocket-critic update --restart` or `systemctl --user restart {unit}`")
+            return
+        click.echo(f"restarting the {unit} service (pid {pid}); a review in progress finishes first")
+        try:
+            service.systemctl("restart", f"{unit}.service")
+        except service.ServiceError as exc:
+            raise click.ClickException(str(exc)) from None
+        click.echo(f"restarted the {unit} service (pid {service.main_pid(unit) or '?'})")
+        return
     if argv is None:
         how = ("restart it the way it was started: `systemctl --user restart rocket-critic` for a systemd "
                "service, Ctrl-C and `rocket-critic watch` in a terminal, or `rocket-critic stop && rocket-critic "
@@ -530,6 +543,133 @@ def restart_watcher(ctx: Ctx, restart: bool, old_version: str) -> None:
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from None
     click.echo(f"started rocket-critic (pid {pid}); log: {workdir / daemon.LOG_NAME}")
+
+
+@cli.group("service")
+def service_cmd() -> None:
+    """Run the watcher as a systemd user service (install, remove, status)."""
+
+
+def _service_name(name: str) -> str:
+    try:
+        return service.check_name(name)
+    except service.ServiceError as exc:
+        raise click.ClickException(str(exc)) from None
+
+
+@service_cmd.command("install")
+@click.option("--name", default=service.DEFAULT_NAME, show_default=True, help="Unit name (one per workdir).")
+@click.option("--repo", "only", multiple=True, help="Only watch this owner/repo (repeatable).")
+@click.option("-i", "--interval", type=Duration(), help="Time between polls (see `watch --interval`).")
+@click.option("--start/--no-start", default=True, show_default=True, help="Start (or restart) it now.")
+@click.option("--linger", is_flag=True,
+              help="Also run `loginctl enable-linger`, so it starts at boot and keeps running after logout.")
+@click.option("--force", is_flag=True, help="Overwrite a unit file that `service install` didn't write.")
+@pass_ctx
+def service_install(ctx: Ctx, name: str, only: tuple[str, ...], interval: int | None, start: bool, linger: bool,
+                    force: bool) -> None:
+    """Install (or update) a systemd user service that runs `watch`.
+
+    Writes ~/.config/systemd/user/NAME.service for the current config and workdir, with
+    the rocket-critic of this environment and your current PATH, then enables it. A
+    watcher started with `rocket-critic start` for the same workdir is stopped first,
+    so the service can take over. Run it again after moving the config or workdir.
+    """
+    name = _service_name(name)
+    s = ctx.settings
+    if not only and not s.repos:
+        raise click.ClickException("no repos configured")
+    path = service.unit_path(name)
+    if path.exists() and not service.ours(path) and not force:
+        raise click.ClickException(f"{path} exists and wasn't written by `service install`; use --force to "
+                                   "replace it")
+    argv = service.executable() + ["-c", str(Path(s.path).resolve())]
+    if ctx.workdir:
+        argv += ["-w", str(s.workdir)]
+    argv.append("watch")
+    for repo in only:
+        argv += ["--repo", repo]
+    if interval is not None:
+        argv += ["--interval", str(interval)]
+
+    try:
+        pid = running_pid(s.workdir)
+        if pid and pid > 0 and service.main_pid(name) != pid:
+            if updater.started_by_start(pid) is None:
+                raise click.ClickException(f"a watcher (pid {pid}) is already running for {s.workdir}, not "
+                                           "started by `rocket-critic start`; stop it first")
+            click.echo(f"stopping the background watcher (pid {pid}) so the service can take over; a review in "
+                       "progress finishes first")
+            daemon.stop(s.workdir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(service.render(argv, s.workdir, os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")))
+        click.echo(f"wrote {path}")
+        service.systemctl("daemon-reload")
+        service.systemctl("enable", f"{name}.service")
+        if start:
+            service.systemctl("restart", f"{name}.service")
+            click.echo(f"started {name} (pid {service.main_pid(name) or '?'})")
+        else:
+            click.echo(f"enabled {name}; start it with `systemctl --user start {name}`")
+        if linger:
+            service.enable_linger()
+            click.echo("enabled lingering: the service starts at boot and keeps running after logout")
+        elif service.linger() is False:
+            click.echo("note: the service stops when you log out; `rocket-critic service install --linger` (or "
+                       "`loginctl enable-linger`) keeps it running and starts it at boot")
+    except service.ServiceError as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(f"logs: `journalctl --user -u {name} -f`; status: `rocket-critic service status`")
+
+
+@service_cmd.command("remove")
+@click.option("--name", default=service.DEFAULT_NAME, show_default=True, help="Unit name.")
+@click.option("--force", is_flag=True, help="Remove a unit file that `service install` didn't write.")
+def service_remove(name: str, force: bool) -> None:
+    """Stop and disable the service and delete its unit file.
+
+    A review in progress finishes first (up to the unit's 50-minute stop timeout).
+    """
+    name = _service_name(name)
+    path = service.unit_path(name)
+    if not path.exists():
+        click.echo(f"no {path}; nothing to remove")
+        return
+    if not service.ours(path) and not force:
+        raise click.ClickException(f"{path} wasn't written by `service install`; use --force to remove it")
+    try:
+        click.echo(f"stopping {name}; a review in progress finishes first")
+        service.systemctl("disable", "--now", f"{name}.service")
+        path.unlink()
+        service.systemctl("daemon-reload")
+        service.systemctl("reset-failed", f"{name}.service", check=False)
+    except service.ServiceError as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(f"removed {path}")
+
+
+@service_cmd.command("status")
+@click.option("--name", default=service.DEFAULT_NAME, show_default=True, help="Unit name.")
+def service_status(name: str) -> None:
+    """Whether the service is installed, enabled and running."""
+    name = _service_name(name)
+    path = service.unit_path(name)
+    if not path.exists():
+        click.echo(f"{name}: not installed ({path} does not exist)")
+        return
+    try:
+        enabled = service.systemctl("is-enabled", f"{name}.service", check=False) or "unknown"
+        active = service.systemctl("is-active", f"{name}.service", check=False) or "unknown"
+    except service.ServiceError as exc:
+        raise click.ClickException(str(exc)) from None
+    pid = service.main_pid(name)
+    lingering = service.linger()
+    click.echo(f"{name}: {active}" + (f" (pid {pid})" if pid else "") + f", {enabled}")
+    click.echo(f"unit: {path}" + ("" if service.ours(path) else " (not written by `service install`)"))
+    if lingering is not None:
+        click.echo("linger: " + ("yes (starts at boot, runs without a login)" if lingering else
+                                 "no (stops when you log out; see `service install --linger`)"))
+    click.echo(f"logs: journalctl --user -u {name} -f")
 
 
 @cli.command()

@@ -50,8 +50,9 @@ rocket-critic update --restart   # install it, then restart the background watch
 downloads the release's wheel, checks it against the release's `SHA256SUMS`, and installs it into the
 environment rocket-critic runs from: with `pipx install --force` for a pipx install, otherwise with that
 environment's pip. `--restart` then restarts a background watcher that `rocket-critic start` launched,
-with the same options. A watcher run another way (a systemd unit, a terminal) is left alone, and `update`
-says how to restart it, e.g. `systemctl --user restart rocket-critic`. So is one that a version without
+with the same options, or the service from `rocket-critic service install`, through `systemctl --user
+restart`. A watcher run another way (a hand-made systemd unit, a terminal) is left alone, and `update`
+says how to restart it. So is one that a version without
 `update` started: restart that one yourself once, with `rocket-critic stop && rocket-critic start`.
 
 `--version X.Y.Z` installs a specific release, which can be older than the current one. `--force` reinstalls
@@ -93,6 +94,7 @@ By default, reviews post as your own GitHub account. To post as a bot such as `r
 | `reload` | Make the running watcher re-read the config now and poll straight away. |
 | `status [--repo o/r] [-n N]` | Whether the watcher is running (and its PID), then recent reviews from the state database. |
 | `clean` | Remove leftover PR worktrees. |
+| `service install [--linger] [--repo o/r ...] [-i DURATION] [--name NAME] [--no-start] [--force]` | Write, enable and start a systemd user service that runs `watch` for the current config and workdir ([details](#as-a-systemd-service)). `service status` shows it, and `service remove` stops and deletes it. |
 | `update [--check] [--restart] [--version X.Y.Z] [--force]` | Update rocket-critic to the latest GitHub release, found and downloaded with `gh` and checked against its `SHA256SUMS` ([details](#updating)). `--restart` restarts the background watcher afterwards. |
 
 Global options:
@@ -361,54 +363,42 @@ Each reload is logged with what changed, e.g. `config reloaded from .../config.t
 
 On a server, systemd can supervise the watcher instead of `start`/`stop`: it starts it at boot, restarts it
 if it crashes and keeps its logs. systemd runs `watch` in the foreground, and `systemctl reload` sends
-the same SIGHUP as `rocket-critic reload`. Ready-to-copy units are in
-[`contrib/systemd/`](contrib/systemd/):
+the same SIGHUP as `rocket-critic reload`.
+
+For a **user service** (no root needed), let rocket-critic write and enable the unit:
+
+```sh
+rocket-critic service install --linger     # write, enable and start ~/.config/systemd/user/rocket-critic.service
+rocket-critic service status
+journalctl --user -u rocket-critic -f
+rocket-critic service remove               # stop, disable and delete it
+```
+
+`service install` uses the current config and workdir (and `-w` if you pass it). The unit runs the
+`rocket-critic` of the environment you ran it from, so it keeps working across `rocket-critic update`.
+It also records your current `PATH`, so the service finds `git`, `gh` and `claude`. It takes `--repo` and
+`--interval` like `watch`, and `--name` for a second unit for another workdir. A watcher started with
+`rocket-critic start` for the same workdir is stopped first, so the service can take over. Run `service
+install` again to update the unit after moving the config or workdir, or after changing `PATH`. Its other
+options:
+
+- `--linger` runs `loginctl enable-linger`, so the service starts at boot and keeps running after you log
+  out. Without it, `service install` tells you when lingering is off.
+- `--no-start` only writes and enables the unit.
+- `--force` replaces a unit file that `service install` didn't write. `remove` likewise only deletes the
+  units `service install` wrote, unless you pass `--force`.
+
+`rocket-critic update --restart` restarts the service through `systemctl --user restart`. Tokens and other
+settings for the service go in `~/.config/rocket-critic/rocket-critic.env` (see
+[`rocket-critic.env.example`](contrib/systemd/rocket-critic.env.example); `chmod 600` it).
+
+Ready-to-copy units are also in [`contrib/systemd/`](contrib/systemd/), for setting one up by hand:
 
 | File | Runs as | Use when |
 | --- | --- | --- |
-| [`user/rocket-critic.service`](contrib/systemd/user/rocket-critic.service) | you, under `systemctl --user` | no root needed; uses `%h` so paths follow your home directory |
+| [`user/rocket-critic.service`](contrib/systemd/user/rocket-critic.service) | you, under `systemctl --user` | what `service install` writes, with example paths |
 | [`system/rocket-critic.service`](contrib/systemd/system/rocket-critic.service) | you (`User=`), under the system manager | starts at boot with no login session; needs root to install |
 | [`rocket-critic.env.example`](contrib/systemd/rocket-critic.env.example) | | optional environment (tokens, poll period) |
-
-The user unit, with paths for a checkout in `~/Workspace/rocket-critic` and the workdir in `work/`:
-
-```ini
-# ~/.config/systemd/user/rocket-critic.service
-[Unit]
-Description=rocket-critic pull request reviewer
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=%h/Workspace/rocket-critic/work
-ExecStart=%h/Workspace/rocket-critic/.venv/bin/rocket-critic -w . watch
-ExecReload=/bin/kill -HUP $MAINPID
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=-%h/.config/rocket-critic/rocket-critic.env
-KillMode=mixed
-KillSignal=SIGTERM
-TimeoutStopSec=50min
-Restart=on-failure
-RestartSec=30s
-
-[Install]
-WantedBy=default.target
-```
-
-Install and run it:
-
-```sh
-mkdir -p ~/.config/systemd/user
-cp contrib/systemd/user/rocket-critic.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now rocket-critic
-loginctl enable-linger "$USER"              # keep running after logout, and start at boot
-
-systemctl --user status rocket-critic
-systemctl --user reload rocket-critic       # re-read config.toml now (it's also reloaded on change)
-journalctl --user -u rocket-critic -f
-```
 
 For the system unit, replace `stephen` and the paths in the file, then install it as root:
 
