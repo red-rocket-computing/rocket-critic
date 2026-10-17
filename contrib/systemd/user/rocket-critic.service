@@ -1,6 +1,8 @@
 # rocket-critic as a systemd *user* service.
 #
-# Install:
+# `rocket-critic service install` writes a unit like this one with your real
+# paths, enables and starts it (`service remove` undoes it). To set it up by
+# hand instead:
 #   mkdir -p ~/.config/systemd/user
 #   cp contrib/systemd/user/rocket-critic.service ~/.config/systemd/user/
 #   # edit the paths below if your checkout or workdir live elsewhere
